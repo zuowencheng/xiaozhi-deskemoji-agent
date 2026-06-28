@@ -1,0 +1,70 @@
+# =============================================================================
+# ESP-IDF / Xiaozhi firmware project
+# =============================================================================
+
+# Build output
+/build/
+build/
+
+# Local sdkconfig backup (giữ sdkconfig nếu đã commit cấu hình board)
+/sdkconfig.old
+sdkconfig.old
+
+# Component Manager: tải lại bằng `idf.py build` / `idf.py reconfigure`
+# Giữ: dependencies.lock, main/idf_component.yml
+/managed_components/
+managed_components/
+
+# Firmware binaries (nếu copy ra ngoài thư mục build)
+*.bin
+*.elf
+*.map
+*.flash.bin
+*.app.bin
+*.bootloader.bin
+*.partition.bin
+
+# clangd / IDE (đường dẫn local tới compile_commands.json)
+.clangd
+compile_commands.json
+
+# VS Code / Cursor — cấu hình máy cá nhân (COM port, IDF_PATH, ...)
+.vscode/
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Cursor
+.cursor/
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Python (scripts/)
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs & temp
+*.log
+*.tmp
+*.swp
+*~
+
+# Merge / backup
+*.orig
+*.bak
