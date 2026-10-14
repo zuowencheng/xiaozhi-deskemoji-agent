@@ -166,6 +166,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     websocket_->OnDisconnected([this]() {
         ESP_LOGI(TAG, "Websocket disconnected");
+        // ⚠️ 这里**不要**自己造 json 消息去清屏（比如发个 clear_chat_message）：
+        //   application.cc 只认 tts/stt/llm/mcp/system/alert 几种 type，
+        //   自造 type 会落到 "Missing message type" 或静默丢弃，等于白写。
+        //   正确做法：断线的正规回调就是 on_audio_channel_closed_，
+        //   application.cc:445-451 已在里面做 display->SetChatMessage("system","")
+        //   + SetDeviceState(kIdle)，残留文案会随之清掉。
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }
@@ -190,6 +196,28 @@ bool WebsocketProtocol::OpenAudioChannel() {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;
+    }
+
+    // ★ 本地修复（2026-10-03 19:20）：补上 on_connected_ 回调调用
+    //
+    // 现象：后台重启后，屏幕一直显示 Alert 弹出的"无法连接服务，请稍后再试"，
+    //       即使 WebSocket 其实已经连上了（服务端日志能看到设备上线），
+    //       且不唤醒小智就永远擦不掉，一唤醒就恢复。
+    //
+    // 根因（已对照上游 HEAD 确认，非我们改坏）：
+    //   `Application::DismissAlert()`（清掉错误提示、恢复 STANDBY）**只在**
+    //   `protocol_->OnConnected(...)` 回调里被调用（application.cc:425）。
+    //   而 `Protocol::OnConnected` 注册的 `on_connected_`，**MQTT 实现会调用**
+    //   （mqtt_protocol.cc:86-88），**WebSocket 实现从不调用** —— 全文件搜不到。
+    //   → 走 WS 的设备永远收不到"已连接"通知 → 错误提示永久驻留。
+    //
+    // 为什么放在 on_audio_channel_opened_ 之前：
+    //   这里正好是 WS 链路上"连接已建立、服务端 hello 已收到"的确定时刻，
+    //   与 MQTT 版触发 on_connected_ 的语义等价，**不改变任何状态机逻辑**，
+    //   只是把上游漏掉的通知补上。失败路径（上面两处 SetError）不会走到这里，
+    //   所以不会误报"已连接"。
+    if (on_connected_ != nullptr) {
+        on_connected_();
     }
 
     if (on_audio_channel_opened_ != nullptr) {
@@ -247,6 +275,15 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
         if (cJSON_IsNumber(frame_duration)) {
             server_frame_duration_ = frame_duration->valueint;
         }
+    }
+
+    // ★ 2026-10-04 聆听超时：后台可调，握手时下发。
+    //   服务端没带这个字段就保持默认 180 秒（见 protocol.h）。
+    //   0 或负数 = 永不超时，退回上游「说完话一直挂着聆听」的老行为。
+    auto listening_timeout = cJSON_GetObjectItem(root, "listening_timeout_sec");
+    if (cJSON_IsNumber(listening_timeout)) {
+        listening_timeout_sec_ = listening_timeout->valueint;
+        ESP_LOGI(TAG, "Listening timeout: %d sec", listening_timeout_sec_);
     }
 
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);

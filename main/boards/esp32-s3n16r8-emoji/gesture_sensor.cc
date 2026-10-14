@@ -6,6 +6,8 @@
 #include "gesture_sensor.h"
 #include "servo_controller.h"
 #include "emoji_controller.h"
+#include "application.h"
+#include "assets/lang_config.h"
 #include <esp_log.h>
 
 #define TAG "GestureSensor"
@@ -71,7 +73,12 @@ const uint8_t initRegisterArray[][2] = {
     {0x6C, 0x04}, {0x6D, 0x2C}, {0x6E, 0x01}, {0x6F, 0x32},
     {0x71, 0x00}, {0x72, 0x01}, {0x73, 0x35}, {0x74, 0x00},
     {0x75, 0x33}, {0x76, 0x31}, {0x77, 0x01}, {0x7C, 0x84},
-    {0x7D, 0x03}, {0x7E, 0x01}
+    {0x7D, 0x03}, {0x7E, 0x01},
+    {0xEF, 0x00}   // ★ 2026-10-13：序列收尾必须切回 bank 0。
+                   //   上游此序列第113条切去 bank 1 后，之后 104 条都在
+                   //   bank 1 写、结尾不回 bank 0；而手势标志寄存器
+                   //   0x43/0x44 只在 bank 0 有效——这是"传感器初始化
+                   //   全部成功却永远读不到手势"的隐患根因。
 };
 
 // 传感器复位序列
@@ -442,7 +449,13 @@ bool GestureSensor::Initialize() {
 
 GestureType GestureSensor::ReadGesture() {
     uint8_t data0 = 0, data1 = 0;
-    
+
+    // ★ 2026-10-13：手势标志寄存器 0x43/0x44 只在 bank 0 有效。
+    //   上游初始化序列第113条切去 bank 1 后再没切回（激活序列虽在开头
+    //   切回 bank 0，但序列自身不自洽就是隐患）。这里每次读前再确保
+    //   一次，任何路径把 bank 落在 1 上都不会再"传感器正常却读不到手势"。
+    WriteRegister(PAJ7620_REGITER_BANK_SEL, PAJ7620_BANK0);
+
     // 紧急修复：简化错误处理，避免栈溢出
     esp_err_t result0 = ReadRegister(PAJ7620_ADDR_GES_PS_DET_FLAG_0, &data0);
     if (result0 != ESP_OK) {
@@ -476,31 +489,44 @@ GestureType GestureSensor::ReadGesture() {
         return GESTURE_NONE;
     }
     
-    // 简化状态检查，减少栈使用
+    // ★ 2026-10-13 心跳日志：50ms 一轮，每 100 轮（约5秒）打一次原始
+    //   寄存器值。排查"手势无反应"时用它区分：寄存器到底动没动。
+    //   附带接近感应（红外测距）原始值：手放前面它必须跳变——
+    //   跳了=红外收发活着（是识别算法没触发）；死0=红外层面就死了（供电/排线/本体）。
     static int debug_counter = 0;
-    if (++debug_counter % 1000 == 0) {  // 减少日志频率
-        ESP_LOGI(TAG, "手势检测状态 - 循环%d次", debug_counter);
+    if (++debug_counter % 100 == 0) {
+        uint8_t ps_state = 0, ps_raw = 0, state_ind = 0;
+        ReadRegister(PAJ7620_ADDR_PS_APPROACH_STATE, &ps_state);
+        ReadRegister(PAJ7620_ADDR_PS_RAW_DATA, &ps_raw);
+        ReadRegister(PAJ7620_ADDR_STATE_INDICATOR, &state_ind);
+        ESP_LOGI(TAG, "手势诊断心跳 - 循环%d次, flag0=0x%02X flag1=0x%02X, 接近状态=0x%02X 接近原始=%u 状态指示=0x%02X",
+                 debug_counter, data0, data1, ps_state, (unsigned)ps_raw, state_ind);
     }
-    
-    // 简化手势检测逻辑，减少复杂日志
+
+    // ★ 2026-10-13 诊断日志：有数据先落日志再走过滤。
+    //   此前被 >0x3F 滤掉时现场无痕，分不清"没检测到"还是"检测到被滤"。
     if (data0 != 0 || data1 != 0) {
-        // 过滤器常见的噪声数据
+        ESP_LOGI(TAG, "手势寄存器原始值: flag0=0x%02X flag1=0x%02X", data0, data1);
+        // 过滤噪声：bit6/bit7 = 顺时针/逆时针，当前映射未支持
         if (data0 > 0x3F) {
             return GESTURE_NONE;
         }
     }
-    
+
     // 简化手势映射，减少日志输出
     GestureType detected_gesture = GESTURE_NONE;
-    
-    // 简化方向映射（根据实际测试结果）
-    if (data0 & GES_DOWN_FLAG) {
+
+    // ★ 2026-10-13 方向映射修正：此前 DOWN_FLAG→判右、UP_FLAG→判左、
+    //   LEFT_FLAG→判上、RIGHT_FLAG→判下，左右上下整个拧掉（上游缺陷，
+    //   会导致"向左挥手头往右转"）。PAJ7620 flag_0 位序：
+    //   bit0=右 bit1=左 bit2=上 bit3=下 bit4=前 bit5=后。
+    if (data0 & GES_RIGHT_FLAG) {
         detected_gesture = GESTURE_RIGHT;
-    } else if (data0 & GES_UP_FLAG) {
-        detected_gesture = GESTURE_LEFT;
     } else if (data0 & GES_LEFT_FLAG) {
+        detected_gesture = GESTURE_LEFT;
+    } else if (data0 & GES_UP_FLAG) {
         detected_gesture = GESTURE_UP;
-    } else if (data0 & GES_RIGHT_FLAG) {
+    } else if (data0 & GES_DOWN_FLAG) {
         detected_gesture = GESTURE_DOWN;
     } else if (data0 & GES_FORWARD_FLAG) {
         detected_gesture = GESTURE_FORWARD;
@@ -521,6 +547,11 @@ GestureType GestureSensor::ReadGesture() {
     if (detected_gesture != GESTURE_NONE) {
         // 防抖动：500ms内忽略重复手势
         if (pdTICKS_TO_MS(current_time - last_gesture_time) < 500) {
+            // ★ 2026-10-13 留痕：静默丢弃在日志上和「传感器压根没出手势」
+            //   长得一模一样，现场永远分不清"跟不上"到底是哪个。
+            //   铁律：静默类防护必须留痕，否则等于没有。
+            ESP_LOGW(TAG, "[冷却丢弃] 手势=%d 距上次=%lums（<500ms 被吞，传感器其实读到了）",
+                     detected_gesture, (unsigned long)pdTICKS_TO_MS(current_time - last_gesture_time));
             return GESTURE_NONE;
         }
         
@@ -828,17 +859,46 @@ esp_err_t GestureSensor::SelectRegisterBank(uint8_t bank) {
 void GestureSensor::GestureTaskFunction(void* pvParameters) {
     GestureSensor* sensor = static_cast<GestureSensor*>(pvParameters);
     ESP_LOGI(TAG, "手势检测任务开始运行，采用deskemoji风格的简洁处理");
-    
+
     int loop_count = 0;
     int success_count = 0;
     TickType_t last_health_check = xTaskGetTickCount();
-    
+
     while (sensor->task_running_) {
+        // ★ 2026-10-14 主人反馈"开了手势模式它自己在待机时摇头晃脑"——
+        //   根因：SetGestureModeEnabled(true) 里那句 SetRandomAnimationEnabled(false)
+        //   有 null guard，emoji_controller_ 未注入时被静默跳过 → 随机动画照跑。
+        //   兜底：手势模式开着、且还没确认关过随机动画时，**补一次**。
+        //   ⚠️ 只能补一次！SetRandomAnimationEnabled(false) 内部会 ClearAnimationQueue()，
+        //   每 50ms 调 = 每秒 20 次清队 = 把 LLM 对话表情/手势 priority 表情一起清掉。
+        if (sensor->gesture_mode_enabled_ && !sensor->random_off_confirmed_ &&
+            sensor->emoji_controller_) {
+            sensor->emoji_controller_->SetRandomAnimationEnabled(false);
+            sensor->random_off_confirmed_ = true;
+        }
+
         GestureType gesture = sensor->ReadGesture();
         
         if (gesture != GESTURE_NONE) {
+            // ★ 2026-10-13 模式过滤：手势识别关闭（默认）时，只认掌心前推
+            //   （开/关聆听），左右上下挥手一律忽略——杜绝待机时手一过就
+            //   瞎摆头。开启手势识别后才全响应。
+            if (!sensor->gesture_mode_enabled_ && gesture != GESTURE_FORWARD) {
+                ESP_LOGI(TAG, "手势识别关闭中，忽略非前推手势: %d", gesture);
+                vTaskDelay(pdMS_TO_TICKS(300));
+                continue;
+            }
             ESP_LOGI(TAG, "检测到手势: %d，立即处理", gesture);
-            
+
+            // ★ 舵机仲裁（2026-10-13）：手势处理全程持有舵机控制权，
+            //   期间自动表情动画的舵机写入抢不到锁、自动让位——
+            //   这就是"手一过去电机就跟我"的实现。拿不到也照做（最坏退化为旧行为）。
+            bool has_servo_lock = false;
+            if (sensor->servo_controller_) {
+                has_servo_lock = sensor->servo_controller_->AcquireControl(3000);
+                ESP_LOGI(TAG, "舵机控制权: %s", has_servo_lock ? "已获取(手势优先)" : "超时(仍继续)");
+            }
+
             // 参考deskemoji：检测到手势后立即复位舵机位置
             if (sensor->servo_controller_) {
                 sensor->servo_controller_->HeadCenter();
@@ -846,6 +906,28 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
             
             // 立即处理手势，无需额外延迟
             sensor->ProcessGesture(gesture);
+
+            // ★ 连续手势识别：连续左右摆动→摇头，连续上下摆动→点头。
+            //   注意：这个函数以前只有定义、全工程没有任何调用点，
+            //   属于彻底的死代码 —— 这正是"左右/上下摇摆不生效"的根因（2026-10-03）。
+            sensor->CheckSequentialGestures(gesture);
+
+            // ★ 2026-10-14 主人反馈"开了手势它自己还摇头"——
+            //   推断根因：手势期间 emoji_controller 动画的 SetServoAngle 抢
+            //   不到锁 break 让位，**但动画方法的调用方没检查返回值**——
+            //   HeadLeft(30) 后还有 vTaskDelay(1000) + HeadCenter()，
+            //   手势释放锁后这两步还能继续跑，**就是"它自己动"的尾巴**。
+            //   修法：延后 0.8s 释放锁（够动画整个 vTaskDelay 跑完并被 break 掉），
+            //   这 0.8s 内下一个手势的 AcquireControl(50ms) 会超时，
+            //   但 L887 日志"超时(仍继续)"就是为这个场景准备的——手势照常执行。
+            //   0.8s 选这个值：够覆盖"SetServoAngle break 让位 + vTaskDelay 1000ms"
+            //   动画尾巴；又短到 1s 内的连击手势不会被阻塞。
+            if (has_servo_lock && sensor->servo_controller_) {
+                vTaskDelay(pdMS_TO_TICKS(800));
+                sensor->servo_controller_->ReleaseControl();
+                ESP_LOGI(TAG, "舵机控制权已延后 0.8s 释放（吞掉动画尾巴）");
+            }
+
             success_count++;
             
             // 手势处理后的短暂延迟，防止重复触发
@@ -885,66 +967,128 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
     
     switch (gesture) {
         case GESTURE_LEFT:
-            ESP_LOGI(TAG, "执行动作：向左手势 -> 头部向左看表情");
+            ESP_LOGI(TAG, "执行动作：向左手势 -> 头部向左看表情（%d°）", GESTURE_OFFSET_X);
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::LOOK_LEFT);
+                emoji_controller_->PlayAnimation(AnimationType::LOOK_LEFT, 0, true);  // priority：手势反馈不被自动动画吞
             }
-            servo_controller_->HeadLeft(30);
+            servo_controller_->HeadLeft(GESTURE_OFFSET_X);
             vTaskDelay(pdMS_TO_TICKS(1000));  // 减少到1秒
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
-            
+
         case GESTURE_RIGHT:
-            ESP_LOGI(TAG, "执行动作：向右手势 -> 头部向右看表情");
+            ESP_LOGI(TAG, "执行动作：向右手势 -> 头部向右看表情（%d°）", GESTURE_OFFSET_X);
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::LOOK_RIGHT);
+                emoji_controller_->PlayAnimation(AnimationType::LOOK_RIGHT, 0, true);
             }
-            servo_controller_->HeadRight(30);
+            servo_controller_->HeadRight(GESTURE_OFFSET_X);
             vTaskDelay(pdMS_TO_TICKS(1000));
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
             
         case GESTURE_UP:
-            ESP_LOGI(TAG, "执行动作：向上手势 -> 抬头表情");
+            ESP_LOGI(TAG, "执行动作：向上手势 -> 抬头表情（%d°）", GESTURE_OFFSET_Y);
             if (emoji_controller_) {
-                emoji_controller_->EyeUp();
+                emoji_controller_->PlayAnimation(AnimationType::THINKING, 0, true);
             }
-            servo_controller_->HeadUp(25);
+            servo_controller_->HeadUp(GESTURE_OFFSET_Y);
             vTaskDelay(pdMS_TO_TICKS(1000));
             if (emoji_controller_) {
-                emoji_controller_->EyeCenter();
+                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
             }
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
-            
+
         case GESTURE_DOWN:
-            ESP_LOGI(TAG, "执行动作：向下手势 -> 低头表情");
+            ESP_LOGI(TAG, "执行动作：向下手势 -> 低头表情（%d°）", GESTURE_OFFSET_Y);
             if (emoji_controller_) {
-                emoji_controller_->EyeDown();
+                emoji_controller_->PlayAnimation(AnimationType::SLEEP, 0, true);
             }
-            servo_controller_->HeadDown(25);
+            servo_controller_->HeadDown(GESTURE_OFFSET_Y);
             vTaskDelay(pdMS_TO_TICKS(1000));
             if (emoji_controller_) {
-                emoji_controller_->EyeCenter();
+                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
             }
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
             
         case GESTURE_FORWARD:
-            ESP_LOGI(TAG, "执行动作：向前手势 -> 惊讶表情 + 启动聊天");
-            if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::SURPRISE);
-                emoji_controller_->EyeBlink();
+            // ★ 2026-10-13：接上设计者预留的线（原注释 start_chat = true）。
+            //   向前推 = 语音互动开关：
+            //     - idle 态 → 进入聆听（带 listening 提示音）
+            //     - speaking 态 → **打断** 播报回 idle，不用等它说完
+            //     - listening 态 → 退出回待机
+            //   不用喊唤醒词，伸手就能聊也能让它闭嘴。
+            //   开/关各配一句预合成语音（gesture_voice_synth.py 产的本地 ogg），
+            //   与唤醒词路线的话术区分开。
+            ESP_LOGI(TAG, "执行动作：向前手势 -> 语音互动开关");
+            {
+                auto& app = Application::GetInstance();
+                DeviceState st = app.GetDeviceState();
+                if (st == kDeviceStateListening) {
+                    ESP_LOGI(TAG, "当前在聆听中 -> 退出聆听，回待机");
+                    app.PlaySound(Lang::Sounds::OGG_GESTURE_BYE);   // 「那我退下了」
+                    app.StopListening();
+                    if (emoji_controller_) {
+                        emoji_controller_->PlayAnimation(AnimationType::SLEEP, 0, true);
+                    }
+                } else if (st == kDeviceStateSpeaking) {
+                    // ★ 2026-10-14 02:38 主人反馈："说话过程中手靠近，应该直接退下"
+                    //   —— 之前代码只处理了 listening 态，speaking 态走 else
+                    //   分支（会再开聆听，把人声和播报一起收进 ASR）。
+                    //   修法：复用 ToggleChatState() 在 speaking 态的逻辑
+                    //   （AbortSpeaking → 等服务端 tts/stop → 状态机回 idle）。
+                    //   走 Schedule 排进主循环，避免手势任务 7 优先级
+                    //   抢主循环的同款坑。
+                    ESP_LOGI(TAG, "当前在播报中 -> 打断播报，回待机");
+                    app.Schedule([&app]() {
+                        app.ToggleChatState();
+                    });
+                    if (emoji_controller_) {
+                        emoji_controller_->PlayAnimation(AnimationType::SLEEP, 0, true);
+                    }
+                } else {
+                    ESP_LOGI(TAG, "当前状态=%d -> 先开聆听，再播提示音", (int)st);
+                    // ★★ 2026-10-14 定稿：麦克风**先开**，欢迎语**后播**。
+                    //
+                    //   三种方案全有实测，别再改回去：
+                    //   A. 先播后开（初版）→ 主人"唤醒后立马说话"那几个字正好落在
+                    //      2.27s 的欢迎语里，此时麦克风还没开，直接丢光。❌
+                    //   B. 先播后开 + IsIdle() 判播完 → IsIdle() 会**抢跑**：
+                    //      OpusCodecTask 把包从 decode 队列取出、还没解码进
+                    //      playback 队列的那一瞬，两个队列同时为空 → 700ms 就误判
+                    //      "播完了"。结果欢迎语还在放就开麦，AFE 听见自己的喇叭
+                    //      → VAD 卡在"有声"整整 20 秒 → AutoStop 永不收尾
+                    //      → 服务端零音频包（01:18 那次实锤）。❌
+                    //   C.（本版）先开麦，欢迎语排进主循环队列、在 ResetDecoder
+                    //      之后播。麦克风从这一刻就在线，欢迎语也不会被擦掉。
+
+                    // ★★ 2026-10-14 02:38 主人反馈："提示音响了立马说话还是无法回答"
+                    //    —— 原来方案 C 把「你请讲」1.14s + listening 0.16s = 1.3s 都
+                    //    排在主循环里，意味着主人至少要等 1.3s 后才能听到提示音。
+                    //    半双工期间他说的话被喇叭覆盖 / VAD 卡"有声"导致 ASR 不出
+                    //    结果 → 体感"提示音后说话没反应"。
+                    //
+                    //   新版：完全去掉 WELCOME（"你请讲"），只播一个 0.16s 的单音
+                    //   listening 提示音 —— 这是"可以说话了"的信号，主人等的时间
+                    //   从 1.3s 降到 0.16s。半双工聋期也跟着降到 0.16s。
+                    //   "我在/您好"等寒暄留给服务端"wakeup_greeting_text"承担。
+                    app.StartListening();   // 麦克风先开，一个字都不丢
+                    app.Schedule([&app]() {
+                        app.PlaySound(Lang::Sounds::OGG_LISTENING);  // 0.16s 单音：可以说了
+                    });
+                    if (emoji_controller_) {
+                        emoji_controller_->PlayAnimation(AnimationType::WAKEUP, 0, true);
+                    }
+                }
             }
-            // 参考deskemoji: 向前手势可以触发特殊功能（如启动语音交互）
-            // start_chat = true; // 这里可以添加启动语音交互的逻辑
-            vTaskDelay(pdMS_TO_TICKS(1500));
+            vTaskDelay(pdMS_TO_TICKS(800));
             break;
             
         case GESTURE_BACKWARD:
             ESP_LOGI(TAG, "执行动作：向后手势 -> 简单眨眼");
             if (emoji_controller_) {
-                emoji_controller_->EyeBlink();
+                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
             }
             vTaskDelay(pdMS_TO_TICKS(500));
             break;
@@ -952,11 +1096,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
         case GESTURE_WAVE:
             ESP_LOGI(TAG, "执行动作：挥手手势 -> 开心表情 + 摇头");
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::HAPPY);
+                emoji_controller_->PlayAnimation(AnimationType::HAPPY, 0, true);
             }
             servo_controller_->HeadShake(3);  // 摇头3次
             if (emoji_controller_) {
-                emoji_controller_->EyeBlink();
+                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
             }
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
@@ -964,11 +1108,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
         case GESTURE_CLOCKWISE:
             ESP_LOGI(TAG, "执行动作：顺时针手势 -> 开心表情");
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::HAPPY);
+                emoji_controller_->PlayAnimation(AnimationType::HAPPY, 0, true);
             }
             servo_controller_->HeadCenter();
             if (emoji_controller_) {
-                emoji_controller_->EyeBlink();
+                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
             }
             break;
             
@@ -976,7 +1120,7 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
             ESP_LOGI(TAG, "执行动作：逆时针手势 -> 随机动画");
             if (emoji_controller_) {
                 // 参考deskemoji的随机动画功能
-                emoji_controller_->PlayAnimation(AnimationType::RANDOM);
+                emoji_controller_->PlayAnimation(AnimationType::RANDOM, 0, true);
             }
             break;
             
@@ -1051,4 +1195,26 @@ void GestureSensor::CheckSequentialGestures(GestureType gesture) {
     }
     
     last_gesture_time_ = current_time;
+}
+// ★ 2026-10-13 手势识别模式开关（服务端 set_gesture_mode 工具经
+//   system/gesture_mode 命令驱动）。开启 = 左右上下全响应 + 随机卖萌停；
+//   关闭（默认）= 只认前推开/关聆听 + 随机卖萌恢复。
+void GestureSensor::SetGestureModeEnabled(bool enabled) {
+    if (gesture_mode_enabled_ == enabled) {
+        return;
+    }
+    gesture_mode_enabled_ = enabled;
+    ESP_LOGI(TAG, "手势识别模式: %s", enabled ? "开启（全响应+停随机动画）" : "关闭（仅前推+恢复随机动画）");
+
+    // 随机动画与手势模式互斥：手势模式下停掉 AnimationTimerTask 的随机源，
+    // 退出时恢复。LLM 对话带的表情动画不受影响（那不是随机动作）。
+    //
+    // ★ 2026-10-14 兜底状态位维护：先清 random_off_confirmed_，让主路径成功时
+    //   自己置位；若 emoji_controller_ 此刻为 null（主路径被跳过），
+    //   GestureTaskFunction 下一轮会用这个状态位补关一次（见那儿注释）。
+    random_off_confirmed_ = false;
+    if (emoji_controller_) {
+        emoji_controller_->SetRandomAnimationEnabled(!enabled);
+        random_off_confirmed_ = true;   // 主路径已处理（开=已关/关=已恢复），兜底不必再跑
+    }
 }

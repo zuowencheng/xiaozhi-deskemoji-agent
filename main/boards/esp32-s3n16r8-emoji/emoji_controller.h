@@ -54,6 +54,7 @@ enum class AnimationType {
 struct AnimationMessage {
     AnimationType type;  // 动画类型
     int param;          // 动画参数（如速度）
+    bool priority;      // true=手势反馈：清队插队首，且无视"已有动画"互斥（2026-10-13）
 };
 
 /**
@@ -203,7 +204,7 @@ public:
      * @param type 动画类型
      * @param param 动画参数
      */
-    void PlayAnimation(AnimationType type, int param = 0);
+    void PlayAnimation(AnimationType type, int param = 0, bool priority = false);
     
     /**
      * @brief 启动眨眼定时器（兼容旧接口）
@@ -233,6 +234,14 @@ public:
      */
     void SetServoController(class ServoController* servo_controller) {
         servo_controller_ = servo_controller;
+    }
+    
+    /**
+     * @brief 设置"随机动画触发"回调（板级注入，用于把表情屏临时亮出来）
+     *        注意：回调在动画任务上下文中执行，内部不可再长期持锁。
+     */
+    void SetRandomAnimationHook(std::function<void()> hook) {
+        random_animation_hook_ = hook;
     }
     
     /**
@@ -308,6 +317,9 @@ private:
     
     // 动画执行标志，用于防止多个动画同时执行
     bool is_animating_ = false;
+    
+    // 随机动画触发回调（板级注入，用于把表情屏临时亮出来）
+    std::function<void()> random_animation_hook_ = nullptr;
     
     // LVGL任务控制
     bool lvgl_task_suspended_ = false;

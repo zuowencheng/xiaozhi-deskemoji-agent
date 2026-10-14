@@ -98,6 +98,10 @@ void AudioService::Start() {
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
+    // （2026-10-05 已删除：这里原来有一个每 30 秒打印唤醒词状态的诊断任务，
+    //  是排查「一直显示在聆听中」时临时加的。它已完成使命，删掉以压薄 fork。
+    //  将来再需要诊断可从 git 历史找回：见 commit 2026-10-03 / 关键词 "ww_diag"。）
+
 #if CONFIG_USE_AUDIO_PROCESSOR
     /* Start the audio input task */
     xTaskCreatePinnedToCore([](void* arg) {
@@ -314,13 +318,57 @@ void AudioService::AudioOutputTask() {
 void AudioService::OpusCodecTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() {
+        // ★ 2026-10-14 带超时等待：原本是无限期 wait，队列一空就睡着，
+        //   静默时永远醒不过来 —— 保活没机会执行。
+        bool ready = audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(300), [this]() {
             return service_stopped_ ||
                 (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) ||
                 (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE);
         });
         if (service_stopped_) {
             break;
+        }
+
+        // ★ 2026-10-14 静音保活：撑住服务端 ASR 会话
+        //
+        //   豆包 ASR 会话在「连续收不到音频包约 8 秒」后被服务端判超时断开，
+        //   服务端日志实锤：
+        //       00:28:00 正在连接ASR服务
+        //       00:28:08 ERROR Timed out waiting for the next audio packet
+        //       00:28:09 重新连接ASR服务      ← 主人这时才开口
+        //   而 AFE/VAD 在静音时**不输出 PCM**，固件于是一个字节都不发，
+        //   会话就这么干等死了。主人唤醒后想两秒再说，开口那几个字全丢在
+        //   重连里 —— 表现就是「喊完没反应，过一会儿才听到后半句」。
+        //
+        //   修法：上传态下静默超过 1.5 秒就补一帧全零 PCM。VAD 判它为静音，
+        //   不影响识别，只把会话续住，主人随时开口都能接住第一句。
+        //   ★ 02:38 主人反馈 "提示音响了立马说话还是无法回答" —— 服务端日志
+        //     实锤 02:34:37 listen start 后**整整 10 秒** 0 音频包，触发
+        //     `Timed out waiting for the next audio packet` 后强制重连。
+        //     根因：豆包 ASR partial result 上报依赖 VAD 端点，全零 PCM 不会
+        //     触发 partial，单纯发静音帧只是不断 TCP，**业务层计时器照走**。
+        //     8s 超时是服务端硬编码，缩短保活间隔到 1.5s 只能让 8s 内多
+        //     发几帧"占位"，不能根除。
+        //     真正根除需要服务端降 end_window_size 或调 ASR provider 的
+        //     上报间隔（属于后台改动）。此处先降保活间隔救急。
+        if (!ready) {
+            if (IsAudioProcessorRunning() && audio_send_queue_.empty() &&
+                std::chrono::steady_clock::now() - last_send_time_ > std::chrono::milliseconds(1500)) {
+                auto packet = std::make_unique<AudioStreamPacket>();
+                packet->frame_duration = OPUS_FRAME_DURATION_MS;
+                packet->sample_rate = 16000;
+                packet->timestamp = 0;
+                std::vector<int16_t> silence(OPUS_FRAME_DURATION_MS * 16000 / 1000, 0);
+                if (opus_encoder_->Encode(std::move(silence), packet->payload)) {
+                    audio_send_queue_.push_back(std::move(packet));
+                    last_send_time_ = std::chrono::steady_clock::now();
+                    lock.unlock();
+                    if (callbacks_.on_send_queue_available) {
+                        callbacks_.on_send_queue_available();
+                    }
+                }
+            }
+            continue;
         }
 
         /* Decode the audio from decode queue */
@@ -374,6 +422,7 @@ void AudioService::OpusCodecTask() {
                 {
                     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
                     audio_send_queue_.push_back(std::move(packet));
+                    last_send_time_ = std::chrono::steady_clock::now();  // 保活计时基准
                 }
                 if (callbacks_.on_send_queue_available) {
                     callbacks_.on_send_queue_available();
@@ -425,6 +474,9 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 
     audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
     audio_encode_queue_.push_back(std::move(task));
+    if (type == kAudioTaskTypeEncodeToSendQueue) {
+        encode_in_count_++;   // ★ 2026-10-14 上行断点计数
+    }
     audio_queue_cv_.notify_all();
 }
 
@@ -449,6 +501,7 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     }
     auto packet = std::move(audio_send_queue_.front());
     audio_send_queue_.pop_front();
+    send_out_count_++;   // ★ 2026-10-14 上行断点计数
     audio_queue_cv_.notify_all();
     return packet;
 }
@@ -491,6 +544,39 @@ void AudioService::EnableWakeWordDetection(bool enable) {
         wake_word_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
     }
+}
+
+// ★ 2026-10-14 开机预热 AFE
+//
+//   实测（tmp/gesture_test3.log）：手势前推 → 进入聆听 → **3.8 秒后**才打印
+//   「AFE Version / Audio communication task started」。原因是 AfeAudioProcessor
+//   的 AFE 实例是**懒加载**的：只有第一次 EnableVoiceProcessing(true) 才
+//   Initialize()。
+//
+//   ⚠️ 别被 3.8s 骗了：建 AFE 本身很快（开机时空闲跑只要 ~80ms，见
+//   tmp/prewarm_check.log 第 3998ms）。慢的是**时机**——交互中那次 Initialize
+//   跑在主循环上，正赶上播欢迎语 + 表情动画刷屏 + LVGL 读 flash 素材，
+//   PSRAM 分配和模型读取全被堵住。所以不是"建模慢"，是"在错的时候建模"。
+//
+//   于是「刚开机后的第一次唤醒」命中这 4 秒黑洞：屏幕显示聆听中，麦克风其实
+//   还没开始喂数据，主人这时候开口，前半句直接蒸发。第二次以后就正常了
+//   （AFE 已缓存）—— 这也解释了为什么故障时有时无。
+//
+//   修法：开机就把 AFE 建好，交互路径上永远不再付这笔钱。
+//   不开采集（不设 PROCESSOR_RUNNING），所以没有额外 CPU/上行流量开销。
+void AudioService::PrepareVoiceProcessing() {
+    if (!audio_processor_) {
+        return;
+    }
+    if (audio_processor_initialized_) {
+        return;
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
+    audio_processor_initialized_ = true;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    ESP_LOGI(TAG, "AFE 预热完成，耗时 %d ms（交互中不再重建）", (int)ms);
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {
@@ -539,7 +625,40 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
     callbacks_ = callbacks;
 }
 
+void AudioService::SetSoundAllowlist(const std::string_view* sounds, size_t count) {
+    sound_allowlist_.clear();
+    for (size_t i = 0; i < count; ++i) {
+        if (sounds[i].data() == nullptr || sounds[i].size() == 0) continue;
+        sound_allowlist_.emplace_back(sounds[i].data(), sounds[i].size());
+    }
+    sound_allowlist_ready_ = true;
+    ESP_LOGI(TAG, "提示音白名单已设置：%u 个音效允许播放，其余全部静音",
+             static_cast<unsigned>(sound_allowlist_.size()));
+}
+
+bool AudioService::IsSoundAllowed(const std::string_view& sound) const {
+    // 白名单未初始化时**放行全部**（保持上游默认行为，避免初始化顺序导致全哑）
+    if (!sound_allowlist_ready_) return true;
+    const char* d = sound.data();
+    size_t n = sound.size();
+    for (const auto& it : sound_allowlist_) {
+        if (it.first == d && it.second == n) return true;
+        // 兜底：同一份静态数据可能被拷贝到不同地址，比对内容（长度取较小者）
+        size_t m = it.second < n ? it.second : n;
+        if (m >= 8 && memcmp(it.first, d, m) == 0) return true;
+    }
+    return false;
+}
+
 void AudioService::PlaySound(const std::string_view& ogg) {
+    // ★★ 2026-10-03 提示音总闸：不在白名单里的音效一律静音。
+    //   主人原话「开场提示音（B提示音）永久去掉」。
+    //   之前逐个注释调用点总会漏（success/exclamation/low_battery/按钮/激活码…），
+    //   在这里统一拦一道最省事，以后上游合代码也带不回来。
+    if (!IsSoundAllowed(ogg)) {
+        ESP_LOGD(TAG, "提示音已被白名单拦截（静音）: %u 字节", static_cast<unsigned>(ogg.size()));
+        return;
+    }
     if (!codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);

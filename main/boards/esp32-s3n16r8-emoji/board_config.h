@@ -41,9 +41,42 @@
 #define SERVO_MIN_Y (SERVO_CENTER_Y - 20)  // 垂直舵机最小角度(上边界) - 中心位置上方20度
 #define SERVO_MAX_Y (SERVO_CENTER_Y + 20)  // 垂直舵机最大角度(下边界) - 中心位置下方20度
 
+// ⚠️ 2026-10-14 主人定稿：**面对面镜像约定**。
+//   主人与设备面对面 → 主人手朝主人的一侧移动，设备头应朝**同一侧视觉方向**转
+//   （等价说法：头朝设备身体的另一侧）。例：手朝主人的左 → 头朝设备的右。
+//   1 = 取反（镜像）  0 = 不取反
+//
+//   历史：08:19 主人要的是「头跟手同向」（非镜像），当时 X_INVERT=1 被记为"反"；
+//   08:48 主人明确澄清要「面对面镜像」→ 非镜像的 X_INVERT=0 才是"反"。
+//   两次期望相反，故本值回 1。**今后以"面对面镜像"为唯一标准，别再摇摆。**
+#define SERVO_X_INVERT 1
+
+// 摇头/摆头幅度（X 轴）。原 20° 太小看不清，主人 02:38 反馈加大。
+// 范围 20~40；>40 接近机械极限可能撞齿轮箱。
+// 2026-10-14 主人又反馈还不够大 → 拉到 40°（SERVO_MAX_X=130 留 10° buffer）。
+#define SERVO_SHAKE_AMPLITUDE 40
+
+// 单次手势左右/上下偏移（2026-10-14 主人反馈单次 30° 不够，加到 40°）。
+// 跟随 SERVO_MAX_X/MIN_X 边界自动 clamp。
+// Y 轴单次用 30°（与 HeadShake 头抬维度对齐）。
+#define GESTURE_OFFSET_X 40
+#define GESTURE_OFFSET_Y 30
+
+// ⚠️ 2026-10-14 主人二次实测（面对面临界帧）：手上抬 → 头实际下俯，反了。
+//    同一轮反馈「面对面镜像」，垂直方向 = 「头跟手同向」（上下无手性）。
+//    历史：02:30 曾设 Y_INVERT=1 修"上下反"，08:19 主人认可；
+//    08:48 主人再测仍为反 → 说明上次的镜像方向判断与实物不符。
+//    本轮翻回 0。**判据：手向上 → 头向上。**
+#define SERVO_Y_INVERT 0
+
 // 原始boardemoji.ino中的步进和延迟值
 #define SERVO_STEP 1           // Arduino中的STEP值
 #define SERVO_DELAY 10         // Arduino中的SERVO_DELAY值
+
+// 开机舵机自检：左15°→右15°→回中（约0.6s）
+//   1 = 开机做一次可见摆动（便于确认舵机通路 + 排查供电）
+//   0 = 关闭，开机只归中不出声
+#define SERVO_BOOT_SELFTEST 1
 
 // 舵机PWM配置，参考Arduino原始代码设置
 #define SERVO_MIN_PULSEWIDTH 500        // 最小脉宽(微秒)
@@ -61,9 +94,16 @@ const ledc_channel_t servo_channels[SERVO_CHANNEL_COUNT] = {
 };
 
 // 舵机引脚数组配置
+//
+// ⚠️ 2026-10-14 主人实测：手掌左右划 → 头上下点；手掌上下划 → 头左右摇。
+//    即**两个舵机的物理轴是对调的**：逻辑"水平"通道（HeadLeft/HeadRight）
+//    真正驱动的是上下点头那个连杆，反之亦然。
+//    这是装配/插头对调造成的，**改这里一行即可，千万别去拆电机重插** ——
+//    拆装有把齿轮和连杆弄断的风险，而软件只是换个 GPIO。
+//    改完语义仍然正确：索引 0 = 左右转，索引 1 = 上下抬。
 const uint8_t servo_pins[SERVO_CHANNEL_COUNT] = {
-    SERVO_HORIZONTAL_PIN,  // 水平舵机
-    SERVO_VERTICAL_PIN,    // 垂直舵机
+    SERVO_VERTICAL_PIN,    // 左右转（物理上装在这个插头的舵机是水平轴）
+    SERVO_HORIZONTAL_PIN,  // 上下抬（物理上装在这个插头的舵机是垂直轴）
 };
 
 // 按钮配置

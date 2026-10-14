@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "boards/esp32-s3n16r8-emoji/gesture_sensor.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -16,6 +17,10 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+
+// ★ 2026-10-13 手势传感器全局桥（定义在 boards/esp32-s3n16r8-emoji/emoji_board.cc）。
+//   服务端 set_gesture_mode 工具经 system/gesture_mode 命令驱动它切模式。
+extern GestureSensor* g_gesture_sensor;
 
 #define TAG "Application"
 
@@ -318,13 +323,29 @@ void Application::StartListening() {
                 }
             }
 
-            SetListeningMode(kListeningModeManualStop);
+            // ★ 2026-10-13 修「手势唤醒后说话没人理/极慢」：
+            //   这里原来硬写 kListeningModeManualStop。而服务端在 manual 模式下
+            //   （core/handle/receiveAudioHandle.py）只把音频往缓存里塞，
+            //   **VAD 永不触发收尾**，ASR 流不结束 → startToChat 不执行 →
+            //   LLM 一次都没被调用。表现就是屏幕显示"聆听中"、人说话却毫无反应。
+            //   改成与语音唤醒（ToggleChatState）完全一致的取值，
+            //   手势唤醒 = 语音唤醒，交互流程对齐。
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
         });
     } else if (device_state_ == kDeviceStateSpeaking) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
-            SetListeningMode(kListeningModeManualStop);
+            // 同上：打断播报后进入的聆听，也必须与语音唤醒同模式。
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
         });
+    } else {
+        // ★ 2026-10-14 静默失败留痕。
+        //   StartListening() 只认 idle / speaking 两种状态，其余（connecting /
+        //   activating / audio_testing / upgrading / fatal…）**什么都不做就返回**。
+        //   主人看到的是"它点头了、像被唤醒了"，但服务端一条 listen 都没收到 ——
+        //   屏幕上"没进聆听"和"进了但没声音"长得一模一样，必须打出来。
+        ESP_LOGW(TAG, "[唤醒失败] StartListening 被忽略：当前状态=%d（只认 idle/speaking）",
+                 (int)device_state_);
     }
 }
 
@@ -363,7 +384,29 @@ void Application::Start() {
     /* Setup the audio service */
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
+    // ★★ 2026-10-03 提示音总闸：只放行「说完话提示音（可以说话了）」，
+    //   其余全部静音 —— 连接成功 success、表情 exclamation、低电量 low_battery、
+    //   按键 success、激活码逐位 0~9…一律不播。
+    //   主人原话「开场提示音永久去掉」。放在 Initialize 之后、Start 之前，
+    //   保证任何早期 PlaySound 也会被拦。
+    {
+        static const std::string_view kAllowed[] = {
+            Lang::Sounds::OGG_LISTENING,          // 「说完话可以说了」——唯一保留
+            Lang::Sounds::OGG_GESTURE_WELCOME,    // 手势唤醒开场白（2026-10-13）
+            Lang::Sounds::OGG_GESTURE_BYE,        // 手势关闭退场语（2026-10-13）
+        };
+        audio_service_.SetSoundAllowlist(kAllowed,
+                                         sizeof(kAllowed) / sizeof(kAllowed[0]));
+    }
     audio_service_.Start();
+
+    // ★ 2026-10-14 开机后台预热 AFE（详见 AudioService::PrepareVoiceProcessing）
+    //   建 AFE 要 ~3.7s，绝不能卡在主循环上，所以丢到独立任务里跑。
+    //   开机几秒内完成，之后任何唤醒都是「零等待」。
+    xTaskCreate([](void* arg) {
+        static_cast<Application*>(arg)->GetAudioService().PrepareVoiceProcessing();
+        vTaskDelete(NULL);
+    }, "afe_prewarm", 8192, this, 1, NULL);
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
@@ -447,17 +490,30 @@ void Application::Start() {
                 Schedule([this]() {
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        // ★ 2026-10-05 记录这次「说话」是怎么来的：
+                        //   说话前是 idle ⇒ 用户没开口，是服务端推的**主动播报**；
+                        //   说话前是 listening ⇒ 用户刚说完话，是正常对话的回复。
+                        //   ★ 必须在 SetDeviceState 之前判断，否则状态已经被改掉了。
+                        speaking_from_idle_ = (device_state_ == kDeviceStateIdle);
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (device_state_ == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
+                        // ★ 2026-10-05 主动播报播完 → 回**待命**，不要再回聆听。
+                        //   原上游行为：AutoStop 模式下一律回聆听。这对「用户说话→回复」是对的（要多轮对话），
+                        //   但对「服务端主动推的播报」是错的：用户根本没开口，播完却把麦克风一直开着，
+                        //   屏幕一直显示聆听中，环境噪声还会触发识别 —— 费电也费钱。
+                        //   ★ 只改主动播报这条路径，正常对话的多轮体验完全不变。
+                        if (listening_mode_ == kListeningModeManualStop || speaking_from_idle_) {
+                            ESP_LOGI(TAG, "TTS stop: %s，回到待机",
+                                     speaking_from_idle_ ? "主动播报结束" : "ManualStop 模式");
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
                         }
+                        speaking_from_idle_ = false;
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -498,6 +554,43 @@ void Application::Start() {
                     Schedule([this]() {
                         Reboot();
                     });
+                } else if (strcmp(command->valuestring, "sound") == 0) {
+                    // ★ 2026-10-03 服务端可控提示音。
+                    //   为什么不在 SetDeviceState(kDeviceStateListening) 里自动播？
+                    //   因为那样"说完话要不要响一声"写死在固件里，后台改不了；
+                    //   改走 system/sound 命令后，**管理台勾一下就生效，不用重新刷机**。
+                    //   发 {"type":"system","command":"sound","sound":"listening"|"popup"}
+                    auto snd = cJSON_GetObjectItem(root, "sound");
+                    bool is_popup = (snd && cJSON_IsString(snd) &&
+                                     strcmp(snd->valuestring, "popup") == 0);
+                    Schedule([this, is_popup]() {
+                        audio_service_.PlaySound(is_popup ? Lang::Sounds::OGG_POPUP
+                                                          : Lang::Sounds::OGG_LISTENING);
+                    });
+                } else if (strcmp(command->valuestring, "standby") == 0) {
+                    // ★ 2026-10-03 主人说「退下吧」要真的待机，不能还在后台聆听。
+                    //   发 {"type":"system","command":"standby"} → 关麦 + 回待机，
+                    //   设备只剩唤醒词监听，不再往服务端送音频。
+                    ESP_LOGI(TAG, "System command: standby（真实待机）");
+                    Schedule([this]() {
+                        aborted_ = true;
+                        SetDeviceState(kDeviceStateIdle);
+                    });
+                } else if (strcmp(command->valuestring, "gesture_mode") == 0) {
+                    // ★ 2026-10-13 手势识别模式开关（服务端 set_gesture_mode 工具）。
+                    //   发 {"type":"system","command":"gesture_mode","enabled":true|false}
+                    //   true  = 开启：左右上下全响应 + 随机卖萌动画停
+                    //   false = 关闭（默认）：只认前推开/关聆听 + 随机动画恢复
+                    auto en = cJSON_GetObjectItem(root, "enabled");
+                    bool enabled = cJSON_IsBool(en) ? cJSON_IsTrue(en) : false;
+                    ESP_LOGI(TAG, "System command: gesture_mode enabled=%d", enabled);
+                    Schedule([this, enabled]() {
+                        if (g_gesture_sensor) {
+                            g_gesture_sensor->SetGestureModeEnabled(enabled);
+                        } else {
+                            ESP_LOGW(TAG, "gesture_mode: 手势传感器不可用");
+                        }
+                    });
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
@@ -507,7 +600,10 @@ void Application::Start() {
             auto message = cJSON_GetObjectItem(root, "message");
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
-                Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
+                // ★ 2026-10-03 传空 sound：原来这里播 OGG_VIBRATION（"嘟"一声），
+                //   属于"该响的时候它自己响"，主人要求开场一律静音。
+                //   底层白名单也会拦，这里直接不传更干净。
+                Alert(status->valuestring, message->valuestring, emotion->valuestring, "");
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
@@ -537,8 +633,10 @@ void Application::Start() {
         std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
         display->ShowNotification(message.c_str());
         display->SetChatMessage("system", "");
-        // Play the success sound to indicate the device is ready
-        audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+        // 2026-10-03 主人反馈：连上服务器时这一声「叮」特别刺耳，去掉。
+        // 原来播的是官方 OGG_SUCCESS（尖锐的提示音），只要不播就行。
+        // 需要提示音的地方统一由服务端发 system/sound 决定（可在后台勾选）。
+        // audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     }
 
     // Start the main event loop task with priority 3
@@ -604,14 +702,121 @@ void Application::MainEventLoop() {
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             clock_ticks_++;
+            // ★ 2026-10-14 主循环存活心跳。手势任务优先级 7、主循环被饿死时
+            //   Schedule 进来的任务可以好几秒不执行（表现为"唤醒了却没进聆听"），
+            //   而这在日志上和"别的环节坏了"长得一样。每 10 秒报一次，
+            //   一眼看出到底是主循环没跑，还是跑了但状态没变。
+            if (clock_ticks_ % 10 == 0) {
+                ESP_LOGI(TAG, "[主循环] 存活 tick=%ld 状态=%d", (long)clock_ticks_, (int)device_state_);
+            }
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+
+            // ★★ 2026-10-04 聆听超时（主人：别一直挂在「聆听中」，费电也费钱）
+            // 根因：上游在 AutoStop 模式下 tts/stop 之后**一律回 kDeviceStateListening**
+            //   （下面 SetDeviceState 里 tts/stop 那段，git diff 确认是上游原版、非本地改动），
+            //   而本板 AFE 没有"语音说完就自动停止聆听"的逻辑，于是只要你不再开口，
+            //   它就永远停在聆听中 —— 麦克风一直开、屏幕一直显示聆听、环境噪声随时触发识别。
+            // 处理：连续 N 秒听不到声音就回待机（唤醒词检测随之恢复）。
+            //   ★ N 秒从服务端 hello 下发（后台可调，默认 180），0 或负数 = 永不超时。
+            //   ★ 有声音立即清零，所以**不会掐断你正在说的话**；
+            //     超时后想继续聊，说句唤醒词即可（本来也要说）。
+            if (device_state_ == kDeviceStateListening) {
+                // ★ 2026-10-14 静默类故障必须留痕（踩过多次）：
+                //   「该听见的没听见」和「循环压根没跑」在日志上长得一模一样。
+                //   每 2 秒报一次采集链路体检，一眼看出 AFE 是不是掉线了。
+                if (clock_ticks_ % 2 == 0) {
+                    ESP_LOGI(TAG, "[聆听体检] 已聆听 %ds：AFE采集=%d 有声=%d 声道开=%d 入队=%lu 已发=%lu",
+                             listening_silent_ticks_,
+                             (int)audio_service_.IsAudioProcessorRunning(),
+                             (int)audio_service_.IsVoiceDetected(),
+                             (int)(protocol_ ? protocol_->IsAudioChannelOpened() : 0),
+                             (unsigned long)audio_service_.GetEncodeInCount(),
+                             (unsigned long)audio_service_.GetSendOutCount());
+                }
+                if (audio_service_.IsVoiceDetected()) {
+                    listening_silent_ticks_ = 0;
+                } else {
+                    listening_silent_ticks_++;
+                    int limit = protocol_ ? protocol_->listening_timeout_sec() : 180;
+                    if (limit > 0 && listening_silent_ticks_ >= limit) {
+                        ESP_LOGI(TAG, "Listening: 连续 %d 秒没听到声音，回到待机", limit);
+                        SetDeviceState(kDeviceStateIdle);
+                    }
+                }
+            }
         
             // Print the debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
                 // SystemInfo::PrintTaskList();
                 SystemInfo::PrintHeapStats();
+            }
+
+            // ★ 本地改造（2026-10-02）：桌面常供电设备 —— 保持与服务端的长连接
+            // 背景：本设备是插电台式机，不需要"空闲就断开省电"。
+            //   服务端要能随时推送「任务完成播报」「定时提醒」这类主动语音，
+            //   前提是设备此刻挂在 WebSocket 上（否则服务端 /notify 只能收到 503）。
+            // 实测：设备原来只在唤醒时连接，说完话就断，主动播报无处可推。
+            // 做法：每 5 秒看一次，处于 idle 且未连接就补上；对话中不打扰。
+            if (clock_ticks_ % 5 == 0
+                && device_state_ == kDeviceStateIdle
+                && protocol_ && !protocol_->IsAudioChannelOpened()) {
+                ESP_LOGI(TAG, "KeepAlive: idle 且未连接，尝试保持长连接");
+                Schedule([this]() {
+                    if (device_state_ == kDeviceStateIdle
+                        && protocol_ && !protocol_->IsAudioChannelOpened()) {
+                        if (protocol_->OpenAudioChannel()) {
+                            ESP_LOGI(TAG, "KeepAlive: 已建立常连（idle 等待服务端主动播报）");
+                        } else {
+                            ESP_LOGW(TAG, "KeepAlive: 建连失败，5 秒后重试");
+                        }
+                    }
+                });
+            }
+
+            // ★★ 2026-10-03 后台重启后的自动重连（主人报「重启后台后屏幕一直显示
+            //   无法连接服务，直到主动唤醒才恢复」）。
+            // 根因：MAIN_EVENT_ERROR 分支里 SetDeviceState(kIdle) 就结束了，
+            //   设备再也不去开音频通道 → 永远停在"连接不上"，必须靠唤醒触发
+            //   StartListening 里的 OpenAudioChannel 才会恢复。
+            // 做法：每 5 秒探测一次，**不限当前状态**（只要不是正在对话/说话），
+            //   没连接就主动重连。16 秒后仍不成功 → 显示"连接中"而不是"无法连接"，
+            //   因为此时它确实在不断重试，展示"正在连接"更贴近事实。
+            if (clock_ticks_ % 5 == 0
+                && protocol_ && !protocol_->IsAudioChannelOpened()
+                && device_state_ != kDeviceStateSpeaking
+                && device_state_ != kDeviceStateListening) {
+                if (server_unreachable_ticks_ == 0) {
+                    ESP_LOGI(TAG, "Reconnect: 音频通道未开，主动重连服务端");
+                    Schedule([this]() {
+                        if (protocol_ && !protocol_->IsAudioChannelOpened()
+                            && device_state_ != kDeviceStateSpeaking
+                            && device_state_ != kDeviceStateListening) {
+                            if (protocol_->OpenAudioChannel()) {
+                                ESP_LOGI(TAG, "Reconnect: 已重新连上后台");
+                            } else {
+                                ESP_LOGW(TAG, "Reconnect: 重连失败，继续等待下一轮");
+                            }
+                        }
+                    });
+                }
+                server_unreachable_ticks_++;
+                // 16 秒（4 轮）还连不上 → 显示"连接中"，别再显示"无法连接"
+                if (server_unreachable_ticks_ == 4) {
+                    auto display = Board::GetInstance().GetDisplay();
+                    if (display) {
+                        display->SetStatus(Lang::Strings::CONNECTING);
+                        display->SetChatMessage("system", "正在重连后台…");
+                    }
+                    ESP_LOGW(TAG, "Reconnect: 多次尝试未成功，屏幕改为显示「正在重连」");
+                }
+            }
+            // 连上了就清零计数
+            if (protocol_ && protocol_->IsAudioChannelOpened()
+                && server_unreachable_ticks_ != 0) {
+                server_unreachable_ticks_ = 0;
+                ESP_LOGI(TAG, "Reconnect: 已连接，恢复正常");
             }
         }
     }
@@ -645,9 +850,25 @@ void Application::OnWakeWordDetected() {
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
 #else
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
-        // Play the pop up sound to indicate the wake word is detected
-        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
+        // ⚠️ 2026-10-03 踩坑记录（勿再重复）：
+        //   这里我曾把 AutoStop 改成 ManualStop，理由是「本板无 AEC，做不到边放边听，
+        //   说完话应该回待机」。**这个改动是错的**，实测症状是：
+        //     主人说「你好小智」→ 设备刚进聆听态、主人还没开口
+        //     → 服务端 VAD 判空音频 → 立刻发 tts stop
+        //     → ManualStop 分支直接 SetDeviceState(kIdle) → 屏幕变「待命」
+        //     → 主人后面说的话**完全不录**，「叫小智没反应」。
+        //   根因：ManualStop 的语义是"**本段音频结束就收工**"，
+        //   它不等 VAD 判完，设计上就是给"按键说话"那种一次性交互用的。
+        //   语音唤醒场景必须用 AutoStop —— 由**服务端 VAD 判断说完了没**，
+        //   设备只负责继续收音。这正是上游 `aec_mode_ == kAecOff ? AutoStop : Realtime`
+        //   这行的用意（本板无 AEC → 走 AutoStop）。
+        //   之前"话被切碎/一直聆听"的真凶是 VAD 参数被调错，不是这个模式。
+        // 2026-10-03：这里原本补过一句 PlaySound(OGG_POPUP)，但唤醒后紧接着就进
+        // kDeviceStateListening，那边会播 OGG_LISTENING —— 两个音连着响很怪，已移除。
+        // 提示音统一在 SetDeviceState(kDeviceStateListening) 里播。
+        // ⚠️ 顺带记一笔坑：PlaySound 只认 **Opus in Ogg**（找 "OpusHead"），
+        //    之前用 soundfile 生成的是 OGG Vorbis → seen_head 永远 false → 一个字节不播。
     } else if (device_state_ == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
     } else if (device_state_ == kDeviceStateActivating) {
@@ -701,14 +922,29 @@ void Application::SetDeviceState(DeviceState state) {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            // 进入聆听 → 静默计数从头开始（配合上面 CLOCK_TICK 的超时）
+            listening_silent_ticks_ = 0;
 
-            // Make sure the audio processor is running
-            if (!audio_service_.IsAudioProcessorRunning()) {
-                // Send the start listening command
-                protocol_->SendStartListening(listening_mode_);
-                audio_service_.EnableVoiceProcessing(true);
-                audio_service_.EnableWakeWordDetection(false);
-            }
+            // ★ 2026-10-03 提示音改为**服务端可控**：
+            //   这里原来硬播 OGG_LISTENING，导致"说完话要不要响一声"只能改固件重刷。
+            //   现在由服务端在 tts/stop 之后发 system/sound 命令（见 OnIncomingJson），
+            //   管理台勾一下就生效。想恢复自动播，把下面这行取消注释即可：
+            // audio_service_.PlaySound(Lang::Sounds::OGG_LISTENING);
+
+            // ★ 2026-10-13 修「假开启」：原逻辑用 IsAudioProcessorRunning()
+            //   间接推断"服务端是否在聆听会话中"——processor 在跑 ≠ 服务端
+            //   知道。Speaking/异常路径漏掉 SendStartListening 时，设备
+            //   显示"聆听中"但服务端没收过 listen，说话全程没人理。
+            //   服务端 listen start 幂等（reset_audio_states），
+            //   每次进入聆听都明发，杜绝本地与服务端状态漂移。
+            protocol_->SendStartListening(listening_mode_);
+            audio_service_.EnableVoiceProcessing(true);
+            audio_service_.EnableWakeWordDetection(false);
+            // ★ 2026-10-14 留痕：进聆听的瞬间 AFE 到底起没起来。
+            //   「屏幕显示聆听中但说话没反应」和「AFE 压根没跑」在日志上原本长得一样。
+            ESP_LOGI(TAG, "[聆听体检] 进入聆听：AFE采集=%d 唤醒词=%d 模式=%d",
+                     (int)audio_service_.IsAudioProcessorRunning(),
+                     (int)audio_service_.IsWakeWordRunning(), (int)listening_mode_);
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);

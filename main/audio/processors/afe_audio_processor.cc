@@ -40,7 +40,15 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
     afe_config->vad_mode = VAD_MODE_0;
-    afe_config->vad_min_noise_ms = 100;
+    // ⚠️ 2026-10-03 主人反馈两轮：
+    //    "说话稍慢就被打断" → 100 改 800（"好一些但还是被打断"）→ 再改 1400。
+    //    关键：设备判定"说完"后会发 listen stop，服务端立刻停止识别出答案，
+    //    所以**这一层是主战场**，服务端 VAD 的 min_silence_duration_ms 是第二道保险。
+    //    调大它的代价 = 说完后要多等这么久才开始识别。
+    //      800=偏灵敏 / 1400=默认 / 2000=非常宽容（但明显感觉慢）
+    //  2026-10-05：数值挪到 Kconfig（LOCAL_TUNING / VAD_MIN_NOISE_MS），
+    //    调参只改 sdkconfig，源码不再有 fork 改动。
+    afe_config->vad_min_noise_ms = CONFIG_VAD_MIN_NOISE_MS;
     if (vad_model_name != nullptr) {
         afe_config->vad_model_name = vad_model_name;
     }

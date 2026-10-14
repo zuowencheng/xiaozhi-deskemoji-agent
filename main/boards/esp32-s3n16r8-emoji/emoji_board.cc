@@ -42,6 +42,11 @@
 
 #define TAG "EmojiBoard"
 
+// ★ 2026-10-13 手势传感器全局桥：Application 的 system/gesture_mode 命令
+//   通过它切「手势识别模式」。EmojiBoard 类定义闷在本文件里，外部拿不到
+//   类型；本工程单板，全局指针是最直接的桥。初始化失败时为 nullptr。
+GestureSensor* g_gesture_sensor = nullptr;
+
 LV_FONT_DECLARE(font_puhui_14_1);
 LV_FONT_DECLARE(font_awesome_14_1);
 
@@ -108,6 +113,13 @@ private:
     
     // 对话模式屏幕
     lv_obj_t* chat_screen_ = nullptr;
+
+    // ---- 自动表情（对话模式下由 AI 情绪临时切到表情屏，静默 N 秒后自动切回）----
+    // 背景：开机默认是对话模式，表情屏只在长按 BOOT 进"表情模式"时才创建，
+    // 导致 AI 情绪动画全部因 emoji_screen_==nullptr 被静默跳过（串口刷警告）。
+    // 这里让情绪触发时自动把表情屏亮出来，看完自动回文字屏，两头都不丢。
+    bool auto_emoji_ = false;
+    lv_timer_t* auto_emoji_timer_ = nullptr;
     
     // 上一次处理的AI回复
     std::string last_ai_response_;
@@ -229,6 +241,15 @@ private:
                 GetDisplay()->ShowNotification("对话模式");
                 emoji_controller_->CleanupEmojiScreen();
                 
+                // 表情屏被删了，同步复位自动表情状态，否则下次情绪触发会只创建不显示
+                {
+                    DisplayLockGuard lock(display_);
+                    auto_emoji_ = false;
+                    if (auto_emoji_timer_ != nullptr) {
+                        lv_timer_pause(auto_emoji_timer_);
+                    }
+                }
+                
                 // 舵机回到中心位置
                 servo_controller_->HeadCenter();
             }
@@ -288,6 +309,45 @@ private:
         }
     }
 
+public:
+    // 自动表情：AI 触发情绪时把表情屏临时亮出来，静默 hold_ms 后自动切回文字屏。
+    // - 手动"表情模式"（长按 BOOT）下什么都不做，避免打断。
+    // - 已亮起时只重置计时器（连续情绪不会反复切屏）。
+    void FlashEmoji(int hold_ms = 5000) {
+        if (is_emoji_mode_) return;
+        DisplayLockGuard lock(display_);
+        if (emoji_controller_->GetEmojiScreen() == nullptr) {
+            emoji_controller_->CreateEmojiScreen();
+        }
+        if (!auto_emoji_) {
+            lv_scr_load(emoji_controller_->GetEmojiScreen());
+            auto_emoji_ = true;
+            ESP_LOGI(TAG, "自动表情：切到表情屏（%d ms 后回文字屏）", hold_ms);
+        }
+        if (auto_emoji_timer_ == nullptr) {
+            auto_emoji_timer_ = lv_timer_create(EmojiBoard::OnAutoEmojiTimeout, hold_ms, this);
+        } else {
+            lv_timer_set_period(auto_emoji_timer_, hold_ms);
+        }
+        if (auto_emoji_timer_ != nullptr) {
+            lv_timer_reset(auto_emoji_timer_);
+            lv_timer_resume(auto_emoji_timer_);
+        }
+    }
+
+private:
+    // 定时器回调：在 LVGL 任务里跑，此时已持锁，不要再套 DisplayLockGuard
+    static void OnAutoEmojiTimeout(lv_timer_t* t) {
+        EmojiBoard* self = static_cast<EmojiBoard*>(lv_timer_get_user_data(t));
+        if (self == nullptr) return;
+        lv_timer_pause(t);
+        self->auto_emoji_ = false;
+        if (!self->is_emoji_mode_ && self->chat_screen_ != nullptr) {
+            lv_scr_load(self->chat_screen_);
+            ESP_LOGI(TAG, "自动表情：已回到文字屏");
+        }
+    }
+
     // 声明静态任务函数为友元函数，使其可以访问私有成员
     friend void StateMonitorTask(void* arg);
 
@@ -309,10 +369,31 @@ public:
         emoji_controller_ = new EmojiController(display_);
         servo_controller_ = new ServoController();
         
+        // ★ 开机即"创建但不显示"表情屏（根因修复，2026-10-03）：
+        //   30 个 Execute*Animation 开头都检查 emoji_screen_==nullptr 就 return，
+        //   而舵机动作 servo_controller_->HeadMove/HeadLeft... 写在 return 之后 →
+        //   表情屏不存在时，表情与舵机一起失效（同一个根因，两条命）。
+        //   这里提前把屏建好，null 检查全部通过，动画与舵机即恢复；
+        //   注意 CreateEmojiScreen() 只 new 对象、不调用 lv_scr_load()，
+        //   所以默认仍是文字屏 —— 正好是"乙方案"。
+        {
+            DisplayLockGuard lock(display_);
+            emoji_controller_->CreateEmojiScreen();
+        }
+        
+        // 随机动画触发时，把表情屏临时亮出来（"活着的桌宠"观感），随后自动回文字屏
+        emoji_controller_->SetRandomAnimationHook([this]() { FlashEmoji(2500); });
+        
         // 初始化控制器
         emoji_controller_->Initialize();
         servo_controller_->Initialize();
-        
+
+#if SERVO_BOOT_SELFTEST
+        // 开机可见摆动：既是"桌宠活着的观感"，也是排查舵机供电的最快手段。
+        // 关掉它只需把 board_config.h 里的 SERVO_BOOT_SELFTEST 改成 0。
+        servo_controller_->SelfTest();
+#endif
+
         // 设置表情控制器的舵机控制器
         emoji_controller_->SetServoController(servo_controller_);
         
@@ -342,10 +423,15 @@ public:
             // 启动手势检测任务
             gesture_sensor_->StartGestureTask();
             ESP_LOGI(TAG, "PAJ7620U2手势识别传感器初始化成功");
+            // ★ 2026-10-13 暴露给 Application：服务端 set_gesture_mode 工具
+            //   经 system/gesture_mode 命令切手势识别模式。类定义闷在本文件里，
+            //   外面拿不到类型，全局指针是最直接的桥（本工程单板，可接受）。
+            g_gesture_sensor = gesture_sensor_;
         } else {
             ESP_LOGE(TAG, "PAJ7620U2手势识别传感器初始化失败");
             delete gesture_sensor_;
             gesture_sensor_ = nullptr;
+            g_gesture_sensor = nullptr;
         }
         
         // 新版MCP架构不再需要设置全局情感控制器指针
@@ -369,6 +455,8 @@ public:
         if (gesture_sensor_) {
             gesture_sensor_->StopGestureTask();
             delete gesture_sensor_;
+            gesture_sensor_ = nullptr;
+            g_gesture_sensor = nullptr;
         }
         
         delete emoji_controller_;
@@ -765,6 +853,11 @@ void EmojiDisplay::SetEmotion(const char* emotion) {
         }
         
         ESP_LOGI(TAG, "映射到我们的表情动作: %s", mapped_emotion.c_str());
+        
+        // 对话模式下自动把表情屏亮出来（中性表情除外，避免无谓切屏）
+        if (board_ != nullptr && mapped_emotion != "neutral") {
+            board_->FlashEmoji();
+        }
         
         // 创建一个单独的任务来执行表情动作，避免阻塞主线程
         // 复制表情字符串，因为它将在任务中使用

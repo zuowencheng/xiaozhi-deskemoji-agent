@@ -83,6 +83,16 @@ private:
     bool has_server_time_ = false;
     bool aborted_ = false;
     int clock_ticks_ = 0;
+    // 2026-10-03：后台重启后自动重连用。连续几轮（每轮 5 秒）没连上服务端
+    int server_unreachable_ticks_ = 0;
+    // 2026-10-04：处于「聆听中」且**连续听不到声音**的秒数（CLOCK_TICK 每秒累加）。
+    //   有声音就清零，所以绝不会把人正在说的话掐断。
+    int listening_silent_ticks_ = 0;
+    // 2026-10-05：本次「说话」是不是**设备主动播报**（服务端推的，用户没开口）。
+    //   判据：进 speaking 之前设备处于 idle → 说明不是对话，是主动播报。
+    //   主动播报播完应该回待命，而不是像对话那样回聆听
+    //   （否则设备会一直挂在聆听中：麦克风常开、屏幕常亮、环境噪声随时触发识别，费电也费钱）。
+    bool speaking_from_idle_ = false;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
     TaskHandle_t main_event_loop_task_handle_ = nullptr;
 

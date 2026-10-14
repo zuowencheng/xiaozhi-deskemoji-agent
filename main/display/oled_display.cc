@@ -11,6 +11,9 @@
 #include <esp_lvgl_port.h>
 #include <font_awesome.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 #define TAG "OledDisplay"
 
 LV_FONT_DECLARE(LVGL_TEXT_FONT);
@@ -75,6 +78,28 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
         ESP_LOGE(TAG, "Failed to add display");
         return;
     }
+
+    /* ---------------------------------------------------------------------
+     * 【冻结修复 2026-10-02】
+     * 本板屏幕是 I2C 的 SSD1306，和手势传感器 PAJ7620 共用一条 I2C 总线。
+     * esp_lvgl_port 对非 RGB/DSI 屏**不会**在 flush 回调里调用 flush_ready，
+     * 而是依赖 panel_io 的 on_color_trans_done 回调。该回调在 I2C 忙
+     * （例如被优先级 7 的手势任务占用）或超时失败时不会触发，而
+     * lvgl_port_flush_callback 又没检查 draw_bitmap 的返回值。
+     *
+     * LVGL 9.3 的 wait_for_flushing() 在 flush_wait_cb == NULL 时执行
+     *     while(disp->flushing);          // 无 delay、不让出 CPU 的裸忙等
+     * 于是 LVGL 任务（优先级 1，绑定 CPU1）原地空转占满 CPU1，同核 IDLE1
+     * （优先级 0）永远得不到调度 -> Task WDT 触发 -> 整个 UI 冻结（表现为
+     * 屏幕卡在"说话中"，但语音链路其实还活着）。
+     *
+     * 注册 flush_wait_cb 后 LVGL 改走另一分支：等待期间主动让出 CPU，并在
+     * 回调返回后强制清零 flushing 计数。这样即使完成回调丢失也不会死锁，
+     * 最坏只丢一帧画面。
+     * ------------------------------------------------------------------- */
+    lv_display_set_flush_wait_cb(display_, [](lv_display_t *disp) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    });
 
     if (height_ == 64) {
         SetupUI_128x64();

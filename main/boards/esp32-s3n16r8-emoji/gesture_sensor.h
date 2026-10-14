@@ -150,6 +150,19 @@ public:
      */
     static void SetI2CMutex(SemaphoreHandle_t mutex);
 
+    /**
+     * @brief 手势识别模式开关（2026-10-13）
+     * true  = 开启：左右上下等全部手势响应（待命/聆听两态都认）
+     * false = 关闭（默认）：只认掌心前推（开/关聆听），其余手势忽略
+     * 由服务端 set_gesture_mode 工具经 system/gesture_mode 命令驱动。
+     */
+    void SetGestureModeEnabled(bool enabled);
+
+    /**
+     * @brief 查询手势识别模式是否开启
+     */
+    bool IsGestureModeEnabled() const { return gesture_mode_enabled_; }
+
 private:
     /**
      * @brief 扫描I2C总线，查找可用设备
@@ -217,4 +230,20 @@ private:
     
     // I2C总线互斥锁，用于与显示屏共享总线
     static SemaphoreHandle_t i2c_mutex_;
+
+    // ★ 2026-10-13 手势识别模式：默认关（只认前推开/关聆听）。
+    //   服务端语音「开启手势识别」置 true——随机卖萌动画同步停掉，
+    //   左右上下挥手全部响应；「关闭手势识别」置 false 并恢复随机动画。
+    bool gesture_mode_enabled_ = false;
+
+    // ★ 2026-10-14 兜底状态位：手势模式开启时是否已确认「随机动画已关」。
+    //   为什么需要它：SetGestureModeEnabled(true) 内部会调
+    //   emoji_controller_->SetRandomAnimationEnabled(false)，但该调用有 null guard——
+    //   若 emoji_controller_ 此刻还没注入，关闭动作被静默跳过，于是随机动画照跑
+    //   （主人看到"开了手势它自己在待机时摇头晃脑"）。
+    //   兜底：GestureTaskFunction 每轮循环若发现"手势模式开着但没确认关过"，
+    //   补调一次并置位。**只补一次**，绝不能每轮都调——因为
+    //   SetRandomAnimationEnabled(false) 内部会 ClearAnimationQueue()，
+    //   高频调用会把 LLM/手势的表情动画一起清掉。
+    bool random_off_confirmed_ = false;
 };

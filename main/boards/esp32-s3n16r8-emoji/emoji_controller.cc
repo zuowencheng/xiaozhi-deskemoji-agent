@@ -38,7 +38,15 @@ void EmojiController::Initialize() {
     BaseType_t task_created = xTaskCreate(
         AnimationTask,    // 任务函数
         "AnimationTask",  // 任务名称
-        4096,            // 堆栈大小
+        // ⚠️⚠️ 2026-10-03 血泪×2：原来 4096 会在「执行惊讶表情动画」里栈溢出 → Rebooting，
+        //    表现为「主动播报没声音 + 设备隔几分钟重连一次（其实是重启）」。
+        //    第一次改到 10240，**仍然溢出**（01:57 采集的 serial_final.log 里
+        //    `ELF file SHA256: a8204da07` 就是 10240 版本，照样
+        //    `A stack overflow in task AnimationTask has been detected`）。
+        //    原因：ExecuteSurpriseAnimation 里调 `lv_refr_now(NULL)` 做同步全树刷新，
+        //    这条 LVGL 9.3 调用链比预想的深得多。直接给到 16KB。
+        //    改完务必 `grep 16384` 确认两处（这里 + 重建任务的那个分支）都改到。
+        16384,           // 堆栈大小
         this,            // 任务参数
         5,               // 任务优先级
         &animation_task_handle_  // 任务句柄
@@ -52,7 +60,7 @@ void EmojiController::Initialize() {
     task_created = xTaskCreate(
         AnimationTimerTask,        // 任务函数
         "AnimationTimerTask",      // 任务名称
-        4096,                      // 堆栈大小
+        6144,                      // 堆栈大小（原 4096，一并放宽）
         this,                      // 任务参数
         5,                         // 任务优先级
         &animation_timer_task_handle_       // 任务句柄
@@ -137,12 +145,16 @@ void EmojiController::AnimationTask(void* pvParameters) {
             }
             
             ESP_LOGI(TAG, "AnimationTask: 收到动画消息，类型: %d, 参数: %d", (int)msg.type, msg.param);
-            
+
             // 根据动画类型执行相应的动画
             // 在执行动画前检查是否有其他动画正在执行
-            if (controller->is_animating_) {
+            // （priority=手势反馈除外：它被自动动画挤掉就等于"设备不理我"，不能丢）
+            if (controller->is_animating_ && !msg.priority) {
                 ESP_LOGW(TAG, "AnimationTask: 已有动画正在执行，跳过此次动画");
                 continue;
+            }
+            if (controller->is_animating_ && msg.priority) {
+                ESP_LOGW(TAG, "AnimationTask: 手势反馈抢占，打断互斥等待");
             }
             
             // 设置动画执行标志
@@ -568,20 +580,31 @@ bool EmojiController::SafeExecuteAnimation(std::function<void()> animation_func)
     return true;
 }
 
-void EmojiController::PlayAnimation(AnimationType type, int param) {
-    ESP_LOGI(TAG, "播放动画，类型: %d, 参数: %d", (int)type, param);
-    
+void EmojiController::PlayAnimation(AnimationType type, int param, bool priority) {
+    ESP_LOGI(TAG, "播放动画，类型: %d, 参数: %d, 优先: %s", (int)type, param, priority ? "是" : "否");
+
     // 检查动画队列是否已创建
     if (animation_queue_ == nullptr) {
         ESP_LOGE(TAG, "PlayAnimation: 动画队列未创建");
         return;
     }
-    
+
     // 创建动画消息
     AnimationMessage msg;
     msg.type = type;
     msg.param = param;
-    
+    msg.priority = priority;
+
+    if (priority) {
+        // 手势反馈：丢弃队列里积压的自动动画，把自己插到队首，
+        // 保证当前正在执行的动画一结束，下一个就是它（不等一队自动动画）。
+        xQueueReset(animation_queue_);
+        if (xQueueSendToFront(animation_queue_, &msg, 0) != pdPASS) {
+            ESP_LOGW(TAG, "PlayAnimation: 优先动画入队失败");
+        }
+        return;
+    }
+
     // 发送动画消息到队列
     if (xQueueSend(animation_queue_, &msg, 0) != pdPASS) {
         ESP_LOGW(TAG, "PlayAnimation: 发送动画消息失败");
@@ -672,6 +695,11 @@ void EmojiController::PlayRandomAnimation() {
 void EmojiController::ExecuteRandomAnimation() {
     AnimationType type = SelectRandomAnimation();
     ESP_LOGI(TAG, "执行随机动画，类型: %d", static_cast<int>(type));
+    
+    // 通知板级：随机动画开始 → 把表情屏临时亮出来（乙方案下默认是文字屏）
+    if (random_animation_hook_) {
+        random_animation_hook_();
+    }
     
     // 检查屏幕和眼睛对象是否存在
     if (emoji_screen_ == nullptr || left_eye_ == nullptr || right_eye_ == nullptr) {
@@ -3180,7 +3208,7 @@ void EmojiController::InitEmoji() {
         BaseType_t task_created = xTaskCreate(
             AnimationTask,
             "AnimationTask",
-            4096,
+            16384,   // 与 Initialize() 保持一致，避免走这条路径时仍然溢出
             this,
             5,
             &animation_task_handle_
@@ -3196,7 +3224,7 @@ void EmojiController::InitEmoji() {
         BaseType_t task_created = xTaskCreate(
             AnimationTimerTask,
             "AnimationTimerTask",
-            4096,
+            6144,
             this,
             5,
             &animation_timer_task_handle_);
@@ -3516,5 +3544,11 @@ void EmojiController::ExecuteCryAnimation() {
 
 // 暂停LVGL任务（空实现，防止链接错误）
 void EmojiController::SuspendLVGLTask() {
-    // TODO: 实现暂停LVGL任务的逻辑
+    // 2026-10-03 结论：本函数【有意】保持 no-op。
+    // - 上游原本是 TODO；而 ResumeLVGLTask() 只在 lvgl_task_suspended_ 为真时才恢复优先级，
+    //   当前该标志永远为假 → 两者实际都是 no-op，不存在"暂停了恢复不回来"的风险。
+    // - 动画期间把 LVGL 任务降优先级，反而会让眼睛刷新变慢（动画卡顿），且依赖任务名
+    //   "taskLVGL" 查找——一旦任务改名就会永久降级。收益为负，故不做。
+    // - 真正解决"看门狗/冻结"的是 oled_display.cc 里注册的 lv_display_set_flush_wait_cb。
+    // 结论：保持空实现是刻意设计，非缺陷。
 }

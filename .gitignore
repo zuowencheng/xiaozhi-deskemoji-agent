@@ -6,6 +6,10 @@
 /build/
 build/
 
+# Release staging: 固件发布包（bin/elf + 快照），只做文件系统备份，不进版本库
+# 源码以 git commit/tag 为准；这里只存二进制与自述文件
+/releases/
+
 # Local sdkconfig backup (giữ sdkconfig nếu đã commit cấu hình board)
 /sdkconfig.old
 sdkconfig.old

@@ -54,6 +54,11 @@ public:
     inline const std::string& session_id() const {
         return session_id_;
     }
+    // ★ 2026-10-04 聆听超时：由服务端在 hello 里下发（后台可调，不用刷机）。
+    //   读不到就用默认值 180 秒。0 或负数 = 永不超时（退回上游行为）。
+    inline int listening_timeout_sec() const {
+        return listening_timeout_sec_;
+    }
 
     void OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket> packet)> callback);
     void OnIncomingJson(std::function<void(const cJSON* root)> callback);
@@ -85,6 +90,7 @@ protected:
 
     int server_sample_rate_ = 24000;
     int server_frame_duration_ = 60;
+    int listening_timeout_sec_ = 180;
     bool error_occurred_ = false;
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;

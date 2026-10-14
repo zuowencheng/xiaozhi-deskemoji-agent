@@ -3,6 +3,9 @@
 
 #include <memory>
 #include <deque>
+#include <vector>
+#include <utility>
+#include <string_view>
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
@@ -94,9 +97,16 @@ public:
     bool IsIdle();
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
+    // ★ 2026-10-14 音频上行断点计数器：配合 [聆听体检] 日志，
+    //   区分「AFE 没产 PCM」/「入队了但没发出」/「发了但服务端没收到」。
+    uint32_t GetEncodeInCount() const { return encode_in_count_; }
+    uint32_t GetSendOutCount() const { return send_out_count_; }
 
     void EnableWakeWordDetection(bool enable);
     void EnableVoiceProcessing(bool enable);
+    // ★ 2026-10-14 预热：只建 AFE（装模型、起通信任务），不启动采集。
+    //   用途见 .cc 中的注释——把首次进入聆听时的 ~3.7s 建 AFE 开销挪到开机。
+    void PrepareVoiceProcessing();
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
 
@@ -105,6 +115,14 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // ★★ 2026-10-03 提示音总闸（主人要求「开场提示音永久去掉」）
+    // PlaySound() 的调用点散落在固件各处（连接成功 success、按键 success、
+    // 表情 exclamation、低电量 low_battery、激活码逐位播 0~9 …），
+    // 一个个去注释/删除总会漏，而且以后上游合并又会带回来。
+    // 所以在**最底层**做：未通过 SetSoundAllowlist() 登记的音效一律静音。
+    // 目前只放行「说完话提示音」（OGG_LISTENING），其余全部禁声。
+    void SetSoundAllowlist(const std::string_view* sounds, size_t count);
+    bool IsSoundAllowed(const std::string_view& sound) const;
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
@@ -122,6 +140,11 @@ private:
     OpusResampler output_resampler_;
     DebugStatistics debug_statistics_;
     srmodel_list_t* models_list_ = nullptr;
+
+    // ★★ 提示音白名单：只放行「说完话提示音」，其余音效一律静音。
+    // 用指针+长度比对（音效是静态嵌入的二进制，同一份数据地址相同）。
+    bool sound_allowlist_ready_ = false;
+    std::vector<std::pair<const char*, size_t>> sound_allowlist_;
 
     EventGroupHandle_t event_group_;
 
@@ -148,6 +171,10 @@ private:
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
+    // ★ 2026-10-14 最近一次向服务端发出音频包的时刻，用于静音保活计时
+    std::chrono::steady_clock::time_point last_send_time_ = std::chrono::steady_clock::now();
+    volatile uint32_t encode_in_count_ = 0;   // 采集 PCM 入编码队列计数
+    volatile uint32_t send_out_count_ = 0;    // 从发送队列取出（=已交给协议层）计数
 
     void AudioInputTask();
     void AudioOutputTask();

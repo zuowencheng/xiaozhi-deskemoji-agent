@@ -11,6 +11,7 @@
 #include <driver/ledc.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <algorithm>
 
 // 舵机相关常量，使用board_config.h中已定义的常量
@@ -41,13 +42,22 @@ public:
      * @brief 初始化舵机控制器
      */
     void Initialize();
+
+    /**
+     * @brief 开机自检：左 15° → 右 15° → 回中（约 0.6s）
+     *
+     * 让主人一眼看到"舵机是活的"，同时用于排查舵机供电是否足够。
+     * 是否调用由 board_config.h 的 SERVO_BOOT_SELFTEST 控制。
+     */
+    void SelfTest();
     
     /**
      * @brief 设置舵机角度
      * @param channel 舵机通道 (0:水平, 1:垂直)
      * @param angle 角度 (0-180)
+     * @return 是否真正写入；false = 仲裁让位（控制权被手势持着）
      */
-    void SetServoAngle(int channel, int angle);
+    bool SetServoAngle(int channel, int angle);
     
     /**
      * @brief 移动头部
@@ -117,8 +127,20 @@ public:
      */
     int GetCurrentYAngle() const { return current_y_angle_; }
 
+    // ---- 舵机仲裁层（2026-10-13 新增）----
+    // 背景：手势任务和自动表情动画都在直接写舵机角度，没有任何互斥，
+    // 同时跑就互相打架（表现：舵机在动但不跟手势）。
+    // 规则：所有角度写入经过递归互斥锁串行化；手势处理期间持锁，
+    // 自动动画抢不到锁（50ms 超时）即让位收工，保证"手势优先"。
+    // 用递归锁是因为手势持锁后调的 HeadLeft() 内部还会再过 SetServoAngle。
+    bool AcquireControl(uint32_t timeout_ms);
+    void ReleaseControl();
+
 private:
     // 舵机角度
     int current_x_angle_ = SERVO_CENTER_X;
     int current_y_angle_ = SERVO_CENTER_Y;
+
+    // 舵机写入递归互斥锁（nullptr = 未初始化，退化为无锁直写）
+    SemaphoreHandle_t servo_mutex_ = nullptr;
 };

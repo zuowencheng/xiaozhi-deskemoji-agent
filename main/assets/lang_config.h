@@ -1,68 +1,68 @@
 // Auto-generated language config
-// Language: vi-VN with en-US fallback
+// Language: zh-CN with en-US fallback
 #pragma once
 
 #include <string_view>
 
-#ifndef vi_vn
-    #define vi_vn  // 預設語言
+#ifndef zh_cn
+    #define zh_cn  // 預設語言
 #endif
 
 namespace Lang {
     // 语言元数据
-    constexpr const char* CODE = "vi-VN";
+    constexpr const char* CODE = "zh-CN";
 
     // 字符串资源 (en-US as fallback for missing keys)
     namespace Strings {
-        constexpr const char* ACCESS_VIA_BROWSER = " URL cấu hình: ";
-        constexpr const char* ACTIVATION = "Kích hoạt";
-        constexpr const char* BATTERY_CHARGING = "Đang sạc";
-        constexpr const char* BATTERY_FULL = "Pin đầy";
-        constexpr const char* BATTERY_LOW = "Pin yếu";
-        constexpr const char* BATTERY_NEED_CHARGE = "Pin yếu, vui lòng sạc";
-        constexpr const char* CHECKING_NEW_VERSION = "Đang kiểm tra phiên bản mới...";
-        constexpr const char* CHECK_NEW_VERSION_FAILED = "Kiểm tra phiên bản mới thất bại, sẽ thử lại sau %d giây: %s";
-        constexpr const char* CONNECTED_TO = "Đã kết nối đến ";
-        constexpr const char* CONNECTING = "Đang kết nối...";
-        constexpr const char* CONNECTION_SUCCESSFUL = "Kết nối thành công";
-        constexpr const char* CONNECT_TO = "Kết nối đến ";
-        constexpr const char* CONNECT_TO_HOTSPOT = "Điểm phát sóng: ";
-        constexpr const char* DETECTING_MODULE = "Đang phát hiện module...";
-        constexpr const char* DOWNLOAD_ASSETS_FAILED = "Tải xuống tài nguyên thất bại";
-        constexpr const char* ENTERING_WIFI_CONFIG_MODE = "Đang vào chế độ cấu hình Wi-Fi...";
-        constexpr const char* ERROR = "Lỗi";
-        constexpr const char* FOUND_NEW_ASSETS = "Tìm thấy tài nguyên mới: %s";
-        constexpr const char* HELLO_MY_FRIEND = "Xin chào, bạn của tôi!";
-        constexpr const char* INFO = "Thông tin";
-        constexpr const char* INITIALIZING = "Đang khởi tạo...";
-        constexpr const char* LISTENING = "Đang lắng nghe...";
-        constexpr const char* LOADING_ASSETS = "Đang tải tài nguyên...";
-        constexpr const char* LOADING_PROTOCOL = "Đang đăng nhập...";
-        constexpr const char* MAX_VOLUME = "Âm lượng tối đa";
-        constexpr const char* MUTED = "Tắt tiếng";
-        constexpr const char* NEW_VERSION = "Phiên bản mới ";
-        constexpr const char* OTA_UPGRADE = "Nâng cấp OTA";
-        constexpr const char* PIN_ERROR = "Vui lòng cắm thẻ SIM";
-        constexpr const char* PLEASE_WAIT = "Vui lòng đợi...";
-        constexpr const char* REGISTERING_NETWORK = "Đang chờ mạng...";
-        constexpr const char* REG_ERROR = "Không thể truy cập mạng, vui lòng kiểm tra trạng thái thẻ SIM";
-        constexpr const char* RTC_MODE_OFF = "Tắt AEC";
-        constexpr const char* RTC_MODE_ON = "Bật AEC";
-        constexpr const char* SCANNING_WIFI = "Đang quét Wi-Fi...";
-        constexpr const char* SERVER_ERROR = "Gửi thất bại, vui lòng kiểm tra mạng";
-        constexpr const char* SERVER_NOT_CONNECTED = "Không thể kết nối đến dịch vụ, vui lòng thử lại sau";
-        constexpr const char* SERVER_NOT_FOUND = "Đang tìm dịch vụ khả dụng";
-        constexpr const char* SERVER_TIMEOUT = "Hết thời gian chờ phản hồi";
-        constexpr const char* SPEAKING = "Đang nói...";
-        constexpr const char* STANDBY = "Chờ";
-        constexpr const char* SWITCH_TO_4G_NETWORK = "Đang chuyển sang 4G...";
-        constexpr const char* SWITCH_TO_WIFI_NETWORK = "Đang chuyển sang Wi-Fi...";
-        constexpr const char* UPGRADE_FAILED = "Nâng cấp thất bại";
-        constexpr const char* UPGRADING = "Hệ thống đang nâng cấp...";
-        constexpr const char* VERSION = "Phiên bản ";
-        constexpr const char* VOLUME = "Âm lượng ";
-        constexpr const char* WARNING = "Cảnh báo";
-        constexpr const char* WIFI_CONFIG_MODE = "Chế độ cấu hình Wi-Fi";
+        constexpr const char* ACCESS_VIA_BROWSER = "，浏览器访问 ";
+        constexpr const char* ACTIVATION = "激活设备";
+        constexpr const char* BATTERY_CHARGING = "正在充电";
+        constexpr const char* BATTERY_FULL = "电量已满";
+        constexpr const char* BATTERY_LOW = "电量不足";
+        constexpr const char* BATTERY_NEED_CHARGE = "电量低，请充电";
+        constexpr const char* CHECKING_NEW_VERSION = "检查新版本...";
+        constexpr const char* CHECK_NEW_VERSION_FAILED = "检查新版本失败，将在 %d 秒后重试：%s";
+        constexpr const char* CONNECTED_TO = "已连接 ";
+        constexpr const char* CONNECTING = "连接中...";
+        constexpr const char* CONNECTION_SUCCESSFUL = "Connection Successful";
+        constexpr const char* CONNECT_TO = "连接 ";
+        constexpr const char* CONNECT_TO_HOTSPOT = "手机连接热点 ";
+        constexpr const char* DETECTING_MODULE = "检测模组...";
+        constexpr const char* DOWNLOAD_ASSETS_FAILED = "下载资源失败";
+        constexpr const char* ENTERING_WIFI_CONFIG_MODE = "进入配网模式...";
+        constexpr const char* ERROR = "错误";
+        constexpr const char* FOUND_NEW_ASSETS = "发现新资源: %s";
+        constexpr const char* HELLO_MY_FRIEND = "你好，我的朋友！";
+        constexpr const char* INFO = "信息";
+        constexpr const char* INITIALIZING = "正在初始化...";
+        constexpr const char* LISTENING = "聆听中...";
+        constexpr const char* LOADING_ASSETS = "加载资源...";
+        constexpr const char* LOADING_PROTOCOL = "登录服务器...";
+        constexpr const char* MAX_VOLUME = "最大音量";
+        constexpr const char* MUTED = "已静音";
+        constexpr const char* NEW_VERSION = "新版本 ";
+        constexpr const char* OTA_UPGRADE = "OTA 升级";
+        constexpr const char* PIN_ERROR = "请插入 SIM 卡";
+        constexpr const char* PLEASE_WAIT = "请稍候...";
+        constexpr const char* REGISTERING_NETWORK = "等待网络...";
+        constexpr const char* REG_ERROR = "无法接入网络，请检查流量卡状态";
+        constexpr const char* RTC_MODE_OFF = "AEC 关闭";
+        constexpr const char* RTC_MODE_ON = "AEC 开启";
+        constexpr const char* SCANNING_WIFI = "扫描 Wi-Fi...";
+        constexpr const char* SERVER_ERROR = "发送失败，请检查网络";
+        constexpr const char* SERVER_NOT_CONNECTED = "无法连接服务，请稍后再试";
+        constexpr const char* SERVER_NOT_FOUND = "正在寻找可用服务";
+        constexpr const char* SERVER_TIMEOUT = "等待响应超时";
+        constexpr const char* SPEAKING = "说话中...";
+        constexpr const char* STANDBY = "待命";
+        constexpr const char* SWITCH_TO_4G_NETWORK = "切换到 4G...";
+        constexpr const char* SWITCH_TO_WIFI_NETWORK = "切换到 Wi-Fi...";
+        constexpr const char* UPGRADE_FAILED = "升级失败";
+        constexpr const char* UPGRADING = "正在升级系统...";
+        constexpr const char* VERSION = "版本 ";
+        constexpr const char* VOLUME = "音量 ";
+        constexpr const char* WARNING = "警告";
+        constexpr const char* WIFI_CONFIG_MODE = "配网模式";
     }
 
     // 音效资源 (en-US as fallback for missing audio files)
@@ -178,6 +178,35 @@ namespace Lang {
         static const std::string_view OGG_POPUP {
         static_cast<const char*>(ogg_popup_start),
         static_cast<size_t>(ogg_popup_end - ogg_popup_start)
+        };
+
+        // 2026-10-03 新增：「可以说话了」提示音（150ms 单音，比 OGG_POPUP 更轻）
+        // 放在 kDeviceStateListening 时播，主人说"他说完话后要立马有个提示音，
+        // 我就知道可以说话了"——不用盯着小屏幕看。
+        // ⚠️ 必须是 Opus in Ogg 格式（PlaySound 只认 "OpusHead"），
+        //    用 OGG Vorbis 会一个字节都不播（踩过）。
+        extern const char ogg_listening_start[] asm("_binary_listening_ogg_start");
+        extern const char ogg_listening_end[] asm("_binary_listening_ogg_end");
+        static const std::string_view OGG_LISTENING {
+        static_cast<const char*>(ogg_listening_start),
+        static_cast<size_t>(ogg_listening_end - ogg_listening_start)
+        };
+
+        // 2026-10-13 新增：手势唤醒开场白「我来啦，您请讲」/ 手势关闭退场语
+        // 「那我退下了」。用 tools/gesture_voice_synth.py 预合成（火山 ogg_opus），
+        // 本地播放零延迟、不烧 TTS 额度、离线可用，与唤醒词路线的话术区分开。
+        extern const char ogg_gesture_welcome_start[] asm("_binary_gesture_welcome_ogg_start");
+        extern const char ogg_gesture_welcome_end[] asm("_binary_gesture_welcome_ogg_end");
+        static const std::string_view OGG_GESTURE_WELCOME {
+        static_cast<const char*>(ogg_gesture_welcome_start),
+        static_cast<size_t>(ogg_gesture_welcome_end - ogg_gesture_welcome_start)
+        };
+
+        extern const char ogg_gesture_bye_start[] asm("_binary_gesture_bye_ogg_start");
+        extern const char ogg_gesture_bye_end[] asm("_binary_gesture_bye_ogg_end");
+        static const std::string_view OGG_GESTURE_BYE {
+        static_cast<const char*>(ogg_gesture_bye_start),
+        static_cast<size_t>(ogg_gesture_bye_end - ogg_gesture_bye_start)
         };
 
         extern const char ogg_success_start[] asm("_binary_success_ogg_start");

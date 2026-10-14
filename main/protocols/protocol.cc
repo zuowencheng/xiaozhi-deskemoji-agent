@@ -79,7 +79,14 @@ void Protocol::SendMcpMessage(const std::string& payload) {
 }
 
 bool Protocol::IsTimeout() const {
-    const int kTimeoutSeconds = 120;
+    // ★ 本地改造（2026-10-02）——原值 120
+    //   原逻辑：设备连续 120 秒没收到服务端数据，就认为音频通道已超时
+    //   （IsAudioChannelOpened() 里带 !IsTimeout()，超时即视为"没连上"）。
+    //   问题：本机把设备改成"桌面常供电、保持长连接"的形态后，服务端在空闲时
+    //   并不会持续下发数据，于是 120 秒必然误判为超时 → 通道被认为断了。
+    //   实测证据：对话结束后约 108~120 秒，服务端即收到 ConnectionClosed。
+    //   改为 1 小时，让空闲期不误判；真正的断线仍由 websocket 的 OnDisconnected 兜底。
+    const int kTimeoutSeconds = 3600;
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
     bool timeout = duration.count() > kTimeoutSeconds;
