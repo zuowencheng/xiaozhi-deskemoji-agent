@@ -383,6 +383,11 @@ public:
         
         // 随机动画触发时，把表情屏临时亮出来（"活着的桌宠"观感），随后自动回文字屏
         emoji_controller_->SetRandomAnimationHook([this]() { FlashEmoji(2500); });
+
+        // ★ 2026-10-14：手势反馈/AI 情绪等 priority 动画也要亮屏——
+        //   手势模式下随机动画被停（没有"每 10s 自动亮屏"），若不接这条，
+        //   手势触发的表情动画会一直在文字屏后面执行，主人完全看不见（只看到头在动）。
+        emoji_controller_->SetPriorityAnimationHook([this]() { FlashEmoji(2500); });
         
         // 初始化控制器
         emoji_controller_->Initialize();
@@ -587,8 +592,18 @@ static void StateMonitorTask(void* arg) {
     
     // 确保初始状态下随机动画是启用的
     if (board->emoji_controller_) {
-        board->emoji_controller_->SetRandomAnimationEnabled(true);
-        ESP_LOGI(TAG, "初始化：启用随机表情动画");
+        // ★ 2026-10-14：手势模式已持久化到 NVS，开机时若恢复为「开启」，
+        //   这里**不能**再把随机动画打开（否则手势模式的"停随机"一开机就被冲掉）。
+        //   时序保证：本任务在 EmojiBoard 构造函数末尾创建（emoji_board.cc:452），
+        //   而 gesture_sensor_ 在 :410 创建、:423 Initialize() 里完成 NVS 恢复 → 此处可查。
+        bool gesture_on = (board->gesture_sensor_ != nullptr) &&
+                          board->gesture_sensor_->IsGestureModeEnabled();
+        if (gesture_on) {
+            ESP_LOGI(TAG, "初始化：手势模式已恢复为开启 → 保持随机动画关闭");
+        } else {
+            board->emoji_controller_->SetRandomAnimationEnabled(true);
+            ESP_LOGI(TAG, "初始化：启用随机表情动画");
+        }
     }
     
     // 监控设备状态
@@ -702,8 +717,22 @@ static void StateMonitorTask(void* arg) {
                 
                 // 恢复随机表情动画
                 if (board->emoji_controller_) {
-                    board->emoji_controller_->SetRandomAnimationEnabled(true);
-                    ESP_LOGI(TAG, "对话结束，恢复随机表情动画");
+                    // ★ 2026-10-14 修（真凶）：原来无条件恢复随机动画 →
+                    //   「对话结束（listening/speaking → idle）」会把随机动画重新打开，
+                    //   直接覆盖掉「手势模式开启 = 停随机动画」的设定。
+                    //   现象：开着手势识别，一对话完它待机又开始自己摇头晃脑，
+                    //   手势和随机动作打架 → 看起来像"手势没反应"。
+                    //   坑点：GestureSensor 那次性兜底（random_off_confirmed_）挡不住这条，
+                    //   因为状态位已置位，不会再补关。
+                    //   正解：只有在手势模式**关闭**时才允许恢复随机动画。
+                    bool gesture_on = (board->gesture_sensor_ != nullptr) &&
+                                      board->gesture_sensor_->IsGestureModeEnabled();
+                    if (gesture_on) {
+                        ESP_LOGI(TAG, "对话结束，但手势模式开启中 → 保持随机动画关闭");
+                    } else {
+                        board->emoji_controller_->SetRandomAnimationEnabled(true);
+                        ESP_LOGI(TAG, "对话结束，恢复随机表情动画");
+                    }
                 }
                 
                 // 触发中性情感

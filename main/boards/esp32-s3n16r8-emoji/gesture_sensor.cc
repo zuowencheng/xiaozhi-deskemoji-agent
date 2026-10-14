@@ -8,6 +8,7 @@
 #include "emoji_controller.h"
 #include "application.h"
 #include "assets/lang_config.h"
+#include "settings.h"      // ★ 2026-10-14 手势模式持久化（NVS）
 #include <esp_log.h>
 
 #define TAG "GestureSensor"
@@ -443,7 +444,23 @@ bool GestureSensor::Initialize() {
     ESP_LOGI(TAG, "PAJ7620U2手势识别传感器初始化完成");
     ESP_LOGI(TAG, "请在传感器上方5-15cm处做明显的手势动作进行测试");
     ESP_LOGI(TAG, "建议: 手势要慢一点、幅度大一点，让传感器有足够时间检测");
-    
+
+    // ★ 2026-10-14 从 NVS 恢复上次的手势模式（主人要求：断电后记住，不用每次重喊）
+    //   为什么放这儿：Initialize() 完成时传感器已就绪。
+    //   此刻 emoji_controller_ 可能还没注入（SetEmojiController 在其后调用），
+    //   SetGestureModeEnabled 里的 null guard 会跳过级联——没关成随机动画不要紧，
+    //   GestureTaskFunction 顶部的一次性兜底（random_off_confirmed_）下一轮会补关。
+    {
+        Settings settings("gesture");          // 只读
+        bool saved_on = settings.GetBool("mode_on", false);
+        if (saved_on) {
+            ESP_LOGI(TAG, "从 NVS 恢复手势识别模式: 开启（上次断电时为开启）");
+            SetGestureModeEnabled(true);
+        } else {
+            ESP_LOGI(TAG, "手势识别模式: 默认关闭（NVS 没存过 or 上次为关闭）");
+        }
+    }
+
     return true;
 }
 
@@ -987,28 +1004,26 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
             break;
             
         case GESTURE_UP:
-            ESP_LOGI(TAG, "执行动作：向上手势 -> 抬头表情（%d°）", GESTURE_OFFSET_Y);
+            // ★ 2026-10-14 主人定稿：手向上 → **眼睛向上看**（原来用 THINKING，语义不搭）
+            ESP_LOGI(TAG, "执行动作：向上手势 -> 眼睛向上看 + 抬头（%d°）", GESTURE_OFFSET_Y);
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::THINKING, 0, true);
+                emoji_controller_->PlayAnimation(AnimationType::LOOK_UP, 0, true);
             }
             servo_controller_->HeadUp(GESTURE_OFFSET_Y);
             vTaskDelay(pdMS_TO_TICKS(1000));
-            if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
-            }
+            // ⚠️ 这里**不要**再补 BLINK：BLINK 是 priority，会 xQueueReset 把还没演完的
+            //    LOOK_UP 挤掉 → 眼睛停在"上翻"状态（垂直动画的收尾精确还原来不及执行）。
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
 
         case GESTURE_DOWN:
-            ESP_LOGI(TAG, "执行动作：向下手势 -> 低头表情（%d°）", GESTURE_OFFSET_Y);
+            // ★ 2026-10-14 主人定稿：手向下 → **眼睛向下看**（原来用 SLEEP）
+            ESP_LOGI(TAG, "执行动作：向下手势 -> 眼睛向下看 + 低头（%d°）", GESTURE_OFFSET_Y);
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::SLEEP, 0, true);
+                emoji_controller_->PlayAnimation(AnimationType::LOOK_DOWN, 0, true);
             }
             servo_controller_->HeadDown(GESTURE_OFFSET_Y);
             vTaskDelay(pdMS_TO_TICKS(1000));
-            if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
-            }
             servo_controller_->HeadCenter();  // 恢复到中心位置
             break;
             
@@ -1086,9 +1101,10 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
             break;
             
         case GESTURE_BACKWARD:
-            ESP_LOGI(TAG, "执行动作：向后手势 -> 简单眨眼");
+            // ★ 2026-10-14 主人定稿：后推 → 尴尬表情（原来只是眨个眼，太轻、几乎看不出）
+            ESP_LOGI(TAG, "执行动作：向后手势 -> 尴尬表情");
             if (emoji_controller_) {
-                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
+                emoji_controller_->PlayAnimation(AnimationType::AWKWARD, 0, true);
             }
             vTaskDelay(pdMS_TO_TICKS(500));
             break;
@@ -1205,6 +1221,15 @@ void GestureSensor::SetGestureModeEnabled(bool enabled) {
     }
     gesture_mode_enabled_ = enabled;
     ESP_LOGI(TAG, "手势识别模式: %s", enabled ? "开启（全响应+停随机动画）" : "关闭（仅前推+恢复随机动画）");
+
+    // ★ 2026-10-14 持久化到 NVS（主人 10:17 拍板：断电后记住，不用每次重喊一遍）。
+    //   Settings 析构时自动 nvs_commit；作用域块保证析构即落盘。
+    //   注意：NVS 写有寿命（约 10 万次），但本函数只在"模式变化"时调用（函数开头
+    //   有 `gesture_mode_enabled_ == enabled` 早退），不会被轮询刷写。
+    {
+        Settings settings("gesture", true);    // 读写
+        settings.SetBool("mode_on", enabled);
+    }
 
     // 随机动画与手势模式互斥：手势模式下停掉 AnimationTimerTask 的随机源，
     // 退出时恢复。LLM 对话带的表情动画不受影响（那不是随机动作）。

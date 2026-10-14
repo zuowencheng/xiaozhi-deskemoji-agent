@@ -163,6 +163,17 @@ void EmojiController::AnimationTask(void* pvParameters) {
             // 暂停LVGL任务，减少刷新频率
             controller->SuspendLVGLTask();
             
+            // ★ 2026-10-14：priority 动画（手势反馈 / AI 情绪）执行前，通知板级把
+            //   表情屏亮出来。否则手势模式下随机动画被停 → 没有"每 10s 自动亮屏"→
+            //   手势表情在文字屏后面执行，主人只看到头在动、看不到表情。
+            //   ⚠️ 只能在这里调（动画任务上下文、不持舵机锁）。不能在 PlayAnimation 里调：
+            //      PlayAnimation 由手势任务（prio 7）调用，此时它**持着舵机锁**，
+            //      在那调 FlashEmoji（要显示锁）会和 AnimationTask 的"显示锁→舵机锁"
+            //      形成反向锁序 → 死锁。
+            if (msg.priority && controller->priority_animation_hook_) {
+                controller->priority_animation_hook_();
+            }
+            
             try {
                 // 执行相应的动画
                 switch (msg.type) {
@@ -192,6 +203,12 @@ void EmojiController::AnimationTask(void* pvParameters) {
                         break;
                     case AnimationType::LOOK_RIGHT:
                         controller->ExecuteLookRightAnimation();
+                        break;
+                    case AnimationType::LOOK_UP:            // ★ 2026-10-14 手势「上」
+                        controller->ExecuteLookUpAnimation();
+                        break;
+                    case AnimationType::LOOK_DOWN:          // ★ 2026-10-14 手势「下」
+                        controller->ExecuteLookDownAnimation();
                         break;
                     case AnimationType::HEAD_NOD:
                         controller->ExecuteHeadNodAnimation();
@@ -3044,6 +3061,92 @@ void EmojiController::ExecuteLookRightAnimation() {
     
     // 完全恢复到中心位置
     EyeCenter();
+}
+
+// ★ 2026-10-14 新增：垂直版「看」动画（手势「上」/「下」用）
+//   原 MoveEye(direction) 只改 left_eye_x_/right_eye_x_（左右），没有上下版本。
+//   这里对称地改 left_eye_y_/right_eye_y_：向上看 = y 减小，向下看 = y 增大
+//   （屏幕坐标 y 向下为正）。
+//   ⚠️ **本函数不动舵机**：手势侧已经调用 HeadUp/HeadDown(GESTURE_OFFSET_Y)，
+//      这里再动一次会互相打架。（LOOK_LEFT/LOOK_RIGHT 那版内部会动舵机，与手势侧的
+//      HeadLeft(40) 重复驱动，属上游历史遗留；垂直版不再重复。）
+void EmojiController::ExecuteLookVertical(bool up) {
+    if (emoji_screen_ == nullptr || left_eye_ == nullptr || right_eye_ == nullptr) {
+        ESP_LOGW(TAG, "ExecuteLookVertical: 屏幕或眼睛对象不存在，跳过");
+        return;
+    }
+
+    const int direction = up ? -1 : 1;   // 屏幕坐标：y 变小 = 向上
+    const int amplitude = 2;             // 与 MoveEye 的 direction_movement_amplitude 一致
+    const int steps = 4;
+
+    // 记录初始值，收尾时精确还原（防被打断后残留偏移）
+    const int y0_l = left_eye_y_, y0_r = right_eye_y_;
+    const int h0_l = left_eye_height_, h0_r = right_eye_height_;
+
+    // 移动 + 轻微眯眼（"看"的神态）
+    for (int i = 0; i < steps; i++) {
+        if (display_) {
+            DisplayLockGuard lock(display_);
+            left_eye_y_ += amplitude * direction;
+            right_eye_y_ += amplitude * direction;
+            left_eye_height_ -= 2;
+            right_eye_height_ -= 2;
+            lv_obj_set_size(left_eye_, left_eye_width_, left_eye_height_);
+            lv_obj_set_pos(left_eye_, left_eye_x_ - left_eye_width_ / 2,
+                           left_eye_y_ - left_eye_height_ / 2);
+            lv_obj_set_size(right_eye_, right_eye_width_, right_eye_height_);
+            lv_obj_set_pos(right_eye_, right_eye_x_ - right_eye_width_ / 2,
+                           right_eye_y_ - right_eye_height_ / 2);
+        }
+        vTaskDelay(pdMS_TO_TICKS(12));
+    }
+
+    // 保持
+    vTaskDelay(pdMS_TO_TICKS(800));
+
+    // 对称恢复
+    for (int i = 0; i < steps; i++) {
+        if (display_) {
+            DisplayLockGuard lock(display_);
+            left_eye_y_ -= amplitude * direction;
+            right_eye_y_ -= amplitude * direction;
+            left_eye_height_ += 2;
+            right_eye_height_ += 2;
+            lv_obj_set_size(left_eye_, left_eye_width_, left_eye_height_);
+            lv_obj_set_pos(left_eye_, left_eye_x_ - left_eye_width_ / 2,
+                           left_eye_y_ - left_eye_height_ / 2);
+            lv_obj_set_size(right_eye_, right_eye_width_, right_eye_height_);
+            lv_obj_set_pos(right_eye_, right_eye_x_ - right_eye_width_ / 2,
+                           right_eye_y_ - right_eye_height_ / 2);
+        }
+        vTaskDelay(pdMS_TO_TICKS(12));
+    }
+
+    // 精确还原（幂等收尾）
+    if (display_) {
+        DisplayLockGuard lock(display_);
+        left_eye_y_ = y0_l;
+        right_eye_y_ = y0_r;
+        left_eye_height_ = h0_l;
+        right_eye_height_ = h0_r;
+        lv_obj_set_size(left_eye_, left_eye_width_, left_eye_height_);
+        lv_obj_set_pos(left_eye_, left_eye_x_ - left_eye_width_ / 2,
+                       left_eye_y_ - left_eye_height_ / 2);
+        lv_obj_set_size(right_eye_, right_eye_width_, right_eye_height_);
+        lv_obj_set_pos(right_eye_, right_eye_x_ - right_eye_width_ / 2,
+                       right_eye_y_ - right_eye_height_ / 2);
+    }
+}
+
+void EmojiController::ExecuteLookUpAnimation() {
+    ESP_LOGI(TAG, "执行向上看动画");
+    ExecuteLookVertical(true);
+}
+
+void EmojiController::ExecuteLookDownAnimation() {
+    ESP_LOGI(TAG, "执行向下看动画");
+    ExecuteLookVertical(false);
 }
 
 void EmojiController::ExecuteHeadNodAnimation() {

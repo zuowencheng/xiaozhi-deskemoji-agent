@@ -47,7 +47,11 @@ enum class AnimationType {
     KISSY,      // 亲吻
     CONFIDENT,  // 自信
     SILLY,      // 傻乎乎
-    RANDOM      // 随机动画
+    RANDOM,     // 随机动画
+
+    // ★ 2026-10-14 追加（**必须放最后**，保持前面所有值不变——日志/映射都按数值）：
+    LOOK_UP,    // 眼睛向上看（手势「上」用；原 MoveEye 只支持左右，这里补垂直版）
+    LOOK_DOWN   // 眼睛向下看（手势「下」用）
 };
 
 // 动画消息结构体
@@ -243,6 +247,22 @@ public:
     void SetRandomAnimationHook(std::function<void()> hook) {
         random_animation_hook_ = hook;
     }
+
+    /**
+     * @brief 设置"priority 动画（手势反馈/AI 情绪）开始执行"回调（板级注入）
+     * ★ 2026-10-14：手势触发的表情动画原来没有把屏切到表情屏 →
+     *   手势模式下随机动画被停，连"每 10s 自动亮屏"也没了 →
+     *   表情动画在文字屏后面执行，**主人根本看不见**（只看到头在动）。
+     *   本回调在 AnimationTask 里、执行 priority 动画前触发（与 random hook 同上下文，
+     *   都是动画任务、都不持舵机锁），板级接 FlashEmoji 即可。
+     * ⚠️ 必须在 AnimationTask 里调，**不能在 PlayAnimation 里调**：
+     *   PlayAnimation 由手势任务（prio 7）调用，此时它**持着舵机锁**；
+     *   若在那调 FlashEmoji（要显示锁），会和 AnimationTask 的"显示锁→舵机锁"
+     *   形成反向锁序 → 死锁。
+     */
+    void SetPriorityAnimationHook(std::function<void()> hook) {
+        priority_animation_hook_ = hook;
+    }
     
     /**
      * @brief 获取表情屏幕
@@ -319,7 +339,12 @@ private:
     bool is_animating_ = false;
     
     // 随机动画触发回调（板级注入，用于把表情屏临时亮出来）
+    // 随机动画触发时的板级回调（把表情屏临时亮出来）
     std::function<void()> random_animation_hook_ = nullptr;
+
+    // priority（手势反馈/AI 情绪）动画开始执行时的板级回调
+    // ★ 2026-10-14：手势表情看不见的修复，见 SetPriorityAnimationHook 注释
+    std::function<void()> priority_animation_hook_ = nullptr;
     
     // LVGL任务控制
     bool lvgl_task_suspended_ = false;
@@ -383,6 +408,10 @@ private:
     void ExecuteConfusedAnimation();
     void ExecuteLookLeftAnimation();
     void ExecuteLookRightAnimation();
+    // ★ 2026-10-14：垂直版"看"（原 MoveEye 只动 x）。up=true 向上看，false 向下看。
+    void ExecuteLookUpAnimation();
+    void ExecuteLookDownAnimation();
+    void ExecuteLookVertical(bool up);
     void ExecuteHeadNodAnimation();
     void ExecuteHeadShakeAnimation();
     void ExecuteHeadRollAnimation();
