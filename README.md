@@ -1,4 +1,4 @@
-# 小智AI桌面机器人ESP32-S3N16R8-Emoji手势识别音乐固件
+# 小智AI桌面机器人ESP32-S3N16R8-Emoji手势识别固件
 基于 https://github.com/Maggotxy/xiaozhi-esp32-music  项目，添加了我们ESP32-S3N16R8-Emoji开发板并增加了手势识别功能。
 
 当前小智框架版本：2.0.1
