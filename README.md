@@ -1,7 +1,7 @@
 # 小智AI桌面机器人ESP32-S3N16R8-Emoji手势识别固件
 基于 https://github.com/Maggotxy/xiaozhi-esp32-music  项目，添加了我们ESP32-S3N16R8-Emoji开发板并增加了手势识别功能。
 
-当前小智框架版本：2.0.1
+当前小智框架版本：2.0.3
 
 ## 硬件要求
 
@@ -11,7 +11,7 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 - INMP441 MEMS麦克风
 - Max98357A I2S音频放大器
 - SSD1306 OLED显示屏 (128x64)
-- 2个SG90舵机 (水平和垂直)
+- 2个MG90S舵机 (水平和垂直) — ⚠️ **必须独立 5V 供电**，与开发板共用 5V 会因堵转电流（约 1A）拉塌电压，表现为"手势传感器失灵"（挂电脑 USB 时手势瞎、换独立电源就正常）
 - PAJ7620U2手势识别传感器
 - 扬声器
 - 面包板和连接线
@@ -69,27 +69,13 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 
 我们希望通过这个项目，能够帮助大家了解 AI 硬件开发，将当下飞速发展的大语言模型应用到实际的硬件设备中。
 
-如果你有任何想法或建议，请随时提出 Issues 或加入 QQ 群：暂无，Telegram群：暂无。
+如果你有任何想法或建议，请随时提出 Issues。
 
 项目主要贡献者：小霜霜Meow(抖音、B站UP)、空白泡泡糖果（B站UP），硅灵造物科技（B站UP）
 
 项目其它贡献者：[@zhubinsheng](https://github.com/zhubinsheng)
 
 贡献者说明：引入部分其它贡献者在其它项目上的代码，并进行了部分修改。
-
-音乐服务器、相关源码提供者(为爱发电)：小霜霜Meow
-
-音乐服务器源码请见 https://github.com/IntelligentlyEverything/MeowMusicServer
-
-### ❕注意事项
-1. 如果小智说找不到歌曲怎么办？
-进入[小智后台](https://xiaozhi.me/)，找到对应设备，修改角色配置
-- 选择 DeepSeekV3 大语言模型
-- 在人物介绍中填入
-    - 收到音乐相关的需求时，只使用 MPC tool self.music.play_song 工具，同时禁止使用 search_music 功能。
-
-2. 内置API调用失败怎么办？
-请查看具体错误代码后，加入QQ群：865754861，或电报群 http://t.me/MeowMusicServer 给出错误代码和日志，等待我们修复。
 
 ### ⚙️已支持硬件芯片系列
 
@@ -153,7 +139,12 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 - 通过设备端 MCP 实现设备控制（音量、灯光、电机、GPIO 等）
 - 通过云端 MCP 扩展大模型能力（智能家居控制、PC桌面操作、知识搜索、邮件收发等）
 本项目新增功能:
-- 新增音乐播放功能，支持播放本地音乐(开发中，敬请期待)、云端音乐(完善中)。
+- 手势识别交互：左右上下挥手 → 头部转向 + 眼睛跟随（**面对面镜像**约定：手朝你的左侧，头朝设备的右侧）
+- 掌心前推 = 语音互动开关（不用唤醒词即可进入聆听；说话中前推可打断播报）
+- 语音开关「手势识别模式」，**断电记忆**（NVS 持久化，重启不用重设）
+- 手势触发时自动切到表情屏显示对应表情，2.5s 后回到文字屏
+- 手势模式开启时自动停掉待机随机动画
+- 语音唤起本机音乐播放器并控制播放（走系统媒体键）
 
 ## 硬件
 
@@ -267,13 +258,3 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 - [100askTeam/xiaozhi-linux](http://github.com/100askTeam/xiaozhi-linux) 百问科技提供的 Linux 客户端
 - [78/xiaozhi-sf32](https://github.com/78/xiaozhi-sf32) 思澈科技的蓝牙芯片固件
 - [QuecPython/solution-xiaozhiAI](https://github.com/QuecPython/solution-xiaozhiAI) 移远提供的 QuecPython 固件
-
-## Star History
-
-<a href="https://star-history.com/#IntelligentlyEverything/xiaozhi-esp32&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=IntelligentlyEverything/xiaozhi-esp32&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=IntelligentlyEverything/xiaozhi-esp32&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=IntelligentlyEverything/xiaozhi-esp32&type=Date" />
- </picture>
-</a>
