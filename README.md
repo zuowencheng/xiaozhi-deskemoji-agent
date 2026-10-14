@@ -3,6 +3,10 @@
 
 当前小智框架版本：2.0.3
 
+> 🔗 **配套的电脑端后台在另一个仓库：** [**xiaozhi-deskemoji-agent-backend**](https://github.com/zuowencheng/xiaozhi-deskemoji-agent-backend)
+> —— 跑在电脑上的语音服务、自研 MCP 工具、主动播报与管理台。
+> 本仓是**设备固件**（表情/手势/舵机/语音唤醒），两者一硬一软、配套使用。
+
 ## 硬件要求
 
 PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版](https://oshwhub.com/jorellee/xiao-zhi-ai-ji-qi-ren-deskemoji-da-ban)
@@ -57,7 +61,19 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 
 具体说明可参见main\boards\esp32-s3n16r8-emoji\README.md
 
+## 本项目新增功能（本板特有）
 
+- 手势识别交互：左右上下挥手 → 头部转向 + 眼睛跟随（**面对面镜像**约定：手朝你的左侧，头朝设备的右侧）
+- 掌心前推 = 语音互动开关（不用唤醒词即可进入聆听；说话中前推可打断播报）
+- 语音开关「手势识别模式」，**断电记忆**（NVS 持久化，重启不用重设）
+- 手势触发时自动切到表情屏显示对应表情，2.5s 后回到文字屏
+- 手势模式开启时自动停掉待机随机动画
+- 语音唤起本机音乐播放器并控制播放（走系统媒体键）
+
+---
+
+<details>
+<summary>📦 上游「超级小智-ESP32」原始说明（继承自 Maggotxy/xiaozhi-esp32-music ← 78/xiaozhi-esp32；与本板复刻无关，点击展开）</summary>
 
 # 超级小智-ESP32
 （中文 | English(编写中) | 日本語(编写中)）
@@ -138,13 +154,11 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 - 支持 ESP32-C3、ESP32-S3、ESP32-P4 芯片平台
 - 通过设备端 MCP 实现设备控制（音量、灯光、电机、GPIO 等）
 - 通过云端 MCP 扩展大模型能力（智能家居控制、PC桌面操作、知识搜索、邮件收发等）
-本项目新增功能:
-- 手势识别交互：左右上下挥手 → 头部转向 + 眼睛跟随（**面对面镜像**约定：手朝你的左侧，头朝设备的右侧）
-- 掌心前推 = 语音互动开关（不用唤醒词即可进入聆听；说话中前推可打断播报）
-- 语音开关「手势识别模式」，**断电记忆**（NVS 持久化，重启不用重设）
-- 手势触发时自动切到表情屏显示对应表情，2.5s 后回到文字屏
-- 手势模式开启时自动停掉待机随机动画
-- 语音唤起本机音乐播放器并控制播放（走系统媒体键）
+
+</details>
+
+<details>
+<summary>🧰 上游通用资料（面包板教程 · 70+开源硬件 · 开发环境 · 开发者文档 · 官方云配置 · 第三方项目，点击展开）</summary>
 
 ## 硬件
 
@@ -258,3 +272,5 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
 - [100askTeam/xiaozhi-linux](http://github.com/100askTeam/xiaozhi-linux) 百问科技提供的 Linux 客户端
 - [78/xiaozhi-sf32](https://github.com/78/xiaozhi-sf32) 思澈科技的蓝牙芯片固件
 - [QuecPython/solution-xiaozhiAI](https://github.com/QuecPython/solution-xiaozhiAI) 移远提供的 QuecPython 固件
+
+</details>
