@@ -120,6 +120,15 @@ public:
      * @brief 停止手势检测任务
      */
     void StopGestureTask();
+
+    /**
+     * @brief 启动手势任务存活看门狗（2026-10-23）
+     *
+     * GestureTaskFunction 每轮循环刷新 last_loop_tick_ms_；看门狗每 5 秒检查一次，
+     * 超过 15 秒没刷新（串口上表现为「手势诊断心跳」断流）就判定任务卡死，
+     * 强制 vTaskDelete + 重建任务，避免只能靠给设备断电恢复。
+     */
+    void StartWatchdog();
     
     /**
      * @brief 测试手势功能，手动触发不同的手势动作
@@ -196,6 +205,16 @@ private:
      * @param pvParameters 任务参数
      */
     static void GestureTaskFunction(void* pvParameters);
+
+    /**
+     * @brief 手势任务存活看门狗任务（2026-10-23）
+     */
+    static void WatchdogTaskFunction(void* pvParameters);
+
+    /**
+     * @brief 当前毫秒 tick（供看门狗与主循环共用）
+     */
+    static uint32_t NowMs();
     
     /**
      * @brief 处理检测到的手势
@@ -214,6 +233,14 @@ private:
     class EmojiController* emoji_controller_;     // 表情控制器指针
     TaskHandle_t gesture_task_handle_;          // 手势检测任务句柄
     bool task_running_;                         // 任务运行状态
+
+    // ★ 2026-10-23 存活看门狗：GestureTaskFunction 每轮刷新 last_loop_tick_ms_，
+    //   看门狗测到超过 WATCHDOG_STALL_MS 没刷新就重建任务。
+    volatile uint32_t last_loop_tick_ms_;       // 主循环最后一次刷卡时间（ms）
+    TaskHandle_t watchdog_task_handle_;         // 看门狗任务句柄
+    uint32_t watchdog_recover_count_;           // 累计重建次数（串口可查）
+
+    static constexpr uint32_t WATCHDOG_STALL_MS = 15000;  // 判定卡死的阈值
     
     // I2C相关句柄
     i2c_master_bus_handle_t i2c_bus_;           // I2C总线句柄

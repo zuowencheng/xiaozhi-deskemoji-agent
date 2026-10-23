@@ -420,13 +420,33 @@ public:
         
         // 设置I2C总线句柄（与显示屏共用）
         gesture_sensor_->SetI2CBus(display_i2c_bus_);
-        if (gesture_sensor_->Initialize()) {
+
+        // ★ 2026-10-23 整轮重试：step0 探测窗口放宽后仍可能碰上总线异常，
+        //   这里再给一次"整轮重来"的机会（Initialize 内部会重新软复位+重写 220 个寄存器）。
+        //   以前是一次失败就 delete 掉对象 → g_gesture_sensor = nullptr，
+        //   服务端再喊「打开手势识别」只会得到"手势传感器不可用"，只能断电重来。
+        bool gesture_inited = false;
+        for (int attempt = 1; attempt <= 2; ++attempt) {
+            if (gesture_sensor_->Initialize()) {
+                gesture_inited = true;
+                if (attempt > 1) {
+                    ESP_LOGW(TAG, "PAJ7620U2第 %d 次初始化成功（前一次失败已自动重试）", attempt);
+                }
+                break;
+            }
+            ESP_LOGW(TAG, "PAJ7620U2初始化第 %d/2 次失败，800ms 后重试", attempt);
+            vTaskDelay(pdMS_TO_TICKS(800));
+        }
+
+        if (gesture_inited) {
             // 设置舵机控制器
             gesture_sensor_->SetServoController(servo_controller_);
             // 设置表情控制器
             gesture_sensor_->SetEmojiController(emoji_controller_);
             // 启动手势检测任务
             gesture_sensor_->StartGestureTask();
+            // ★ 2026-10-23 任务存活看门狗：卡死（串口上"手势诊断心跳"断流）自动重建任务
+            gesture_sensor_->StartWatchdog();
             ESP_LOGI(TAG, "PAJ7620U2手势识别传感器初始化成功");
             // ★ 2026-10-13 暴露给 Application：服务端 set_gesture_mode 工具
             //   经 system/gesture_mode 命令切手势识别模式。类定义闷在本文件里，

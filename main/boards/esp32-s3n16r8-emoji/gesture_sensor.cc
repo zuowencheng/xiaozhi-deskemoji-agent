@@ -118,6 +118,9 @@ GestureSensor::GestureSensor()
       emoji_controller_(nullptr),
       gesture_task_handle_(nullptr),
       task_running_(false),
+      last_loop_tick_ms_(0),
+      watchdog_task_handle_(nullptr),
+      watchdog_recover_count_(0),
       i2c_bus_(nullptr),
       i2c_dev_(nullptr),
       current_state_(STATE_IDLE),
@@ -127,6 +130,11 @@ GestureSensor::GestureSensor()
 }
 
 GestureSensor::~GestureSensor() {
+    // ★ 2026-10-23 先停看门狗：否则对象析构后它还会去重建任务（访问已释放内存）
+    if (watchdog_task_handle_ != nullptr) {
+        vTaskDelete(watchdog_task_handle_);
+        watchdog_task_handle_ = nullptr;
+    }
     StopGestureTask();
     if (i2c_dev_) {
         i2c_master_bus_rm_device(i2c_dev_);
@@ -219,8 +227,12 @@ bool GestureSensor::Initialize() {
     uint8_t reg_addr = 0x00; // Part ID register
     bool is_nack = false;
 
-    // 尝试探测多次 (增加到6次)
-    const int PROBE_RETRIES = 6;
+    // ★ 2026-10-23 探测窗口 6 次×50ms(约450ms) 太窄：开机瞬间 I2C 总线和
+    //   SSD1306 抢仲裁、传感器上电未稳，都会让 step0 直接判"未连接"→ return false
+    //   → 整个上电周期手势全废，只能靠复位重来（10-23 23:38 实测踩中：
+    //   同固件同板，重刷一次就正常，220/220）。
+    //   放宽到 20 次 × 150ms(最长约 3s)，代价只是开机多等最多 3 秒。
+    const int PROBE_RETRIES = 20;
     for (int i = 0; i < PROBE_RETRIES; i++) {
         // 尝试获取锁并读取
         if (i2c_mutex_) {
@@ -619,6 +631,62 @@ void GestureSensor::StopGestureTask() {
     }
 }
 
+// ★ 2026-10-23 存活看门狗 ---------------------------------------------------
+//   背景：10-19 有一段时间整段串口日志零条「手势诊断心跳」，等于 ReadGesture()
+//   根本没被调用；当时只能给设备断电才好。这里加一层自愈：
+//   主循环每轮刷 last_loop_tick_ms_，看门狗 5 秒查一次，超过 15 秒没刷新就
+//   把任务删掉重建。舵机锁用 AcquireControl(3000) 带超时，所以即便原任务
+//   卡在等锁上，重建后的任务也不会被永久堵死。
+uint32_t GestureSensor::NowMs() {
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+void GestureSensor::WatchdogTaskFunction(void* pvParameters) {
+    GestureSensor* sensor = static_cast<GestureSensor*>(pvParameters);
+    ESP_LOGI(TAG, "手势任务看门狗已启动（阈值 %u ms，每 5 秒检查）",
+             (unsigned)sensor->WATCHDOG_STALL_MS);
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (!sensor->task_running_) {
+            continue;
+        }
+        uint32_t last = sensor->last_loop_tick_ms_;
+        if (last == 0) {
+            continue;   // 还没跑到第一轮循环，给它时间
+        }
+        uint32_t stale = NowMs() - last;
+        if (stale > sensor->WATCHDOG_STALL_MS) {
+            sensor->watchdog_recover_count_++;
+            ESP_LOGE(TAG, "手势任务疑似卡死（%u ms 无心跳），第 %u 次强制重建",
+                     (unsigned)stale, (unsigned)sensor->watchdog_recover_count_);
+            sensor->task_running_ = false;
+            if (sensor->gesture_task_handle_ != nullptr) {
+                vTaskDelete(sensor->gesture_task_handle_);
+                sensor->gesture_task_handle_ = nullptr;
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+            sensor->last_loop_tick_ms_ = NowMs();
+            sensor->StartGestureTask();
+            ESP_LOGW(TAG, "手势任务已重建，接下来盯「手势诊断心跳」是否恢复");
+        }
+    }
+}
+
+void GestureSensor::StartWatchdog() {
+    if (watchdog_task_handle_ != nullptr) {
+        return;
+    }
+    xTaskCreate(
+        WatchdogTaskFunction,
+        "GestureWatchdog",
+        4096,
+        this,
+        3,      // 低于手势任务(7)，别抢 CPU
+        &watchdog_task_handle_
+    );
+}
+
 void GestureSensor::TestGestureActions() {
     if (!servo_controller_) {
         ESP_LOGE(TAG, "测试失败：舵机控制器未设置");
@@ -881,7 +949,13 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
     int success_count = 0;
     TickType_t last_health_check = xTaskGetTickCount();
 
+    // ★ 2026-10-23 看门狗首次刷卡，避免刚创建就被判"卡死"
+    sensor->last_loop_tick_ms_ = NowMs();
+
     while (sensor->task_running_) {
+        // ★ 2026-10-23 每轮刷卡：看门狗靠它判断任务是不是还活着
+        sensor->last_loop_tick_ms_ = NowMs();
+
         // ★ 2026-10-14 主人反馈"开了手势模式它自己在待机时摇头晃脑"——
         //   根因：SetGestureModeEnabled(true) 里那句 SetRandomAnimationEnabled(false)
         //   有 null guard，emoji_controller_ 未注入时被静默跳过 → 随机动画照跑。

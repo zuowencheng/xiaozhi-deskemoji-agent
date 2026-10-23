@@ -166,6 +166,34 @@ namespace Lang {
         static_cast<size_t>(ogg_exclamation_end - ogg_exclamation_start)
         };
 
+        extern const char ogg_gesture_bye_start[] asm("_binary_gesture_bye_ogg_start");
+        extern const char ogg_gesture_bye_end[] asm("_binary_gesture_bye_ogg_end");
+        static const std::string_view OGG_GESTURE_BYE {
+        static_cast<const char*>(ogg_gesture_bye_start),
+        static_cast<size_t>(ogg_gesture_bye_end - ogg_gesture_bye_start)
+        };
+
+        extern const char ogg_gesture_welcome_long_backup_start[] asm("_binary_gesture_welcome_long_backup_ogg_start");
+        extern const char ogg_gesture_welcome_long_backup_end[] asm("_binary_gesture_welcome_long_backup_ogg_end");
+        static const std::string_view OGG_GESTURE_WELCOME_LONG_BACKUP {
+        static_cast<const char*>(ogg_gesture_welcome_long_backup_start),
+        static_cast<size_t>(ogg_gesture_welcome_long_backup_end - ogg_gesture_welcome_long_backup_start)
+        };
+
+        extern const char ogg_gesture_welcome_start[] asm("_binary_gesture_welcome_ogg_start");
+        extern const char ogg_gesture_welcome_end[] asm("_binary_gesture_welcome_ogg_end");
+        static const std::string_view OGG_GESTURE_WELCOME {
+        static_cast<const char*>(ogg_gesture_welcome_start),
+        static_cast<size_t>(ogg_gesture_welcome_end - ogg_gesture_welcome_start)
+        };
+
+        extern const char ogg_listening_start[] asm("_binary_listening_ogg_start");
+        extern const char ogg_listening_end[] asm("_binary_listening_ogg_end");
+        static const std::string_view OGG_LISTENING {
+        static_cast<const char*>(ogg_listening_start),
+        static_cast<size_t>(ogg_listening_end - ogg_listening_start)
+        };
+
         extern const char ogg_low_battery_start[] asm("_binary_low_battery_ogg_start");
         extern const char ogg_low_battery_end[] asm("_binary_low_battery_ogg_end");
         static const std::string_view OGG_LOW_BATTERY {
@@ -178,35 +206,6 @@ namespace Lang {
         static const std::string_view OGG_POPUP {
         static_cast<const char*>(ogg_popup_start),
         static_cast<size_t>(ogg_popup_end - ogg_popup_start)
-        };
-
-        // 2026-10-03 新增：「可以说话了」提示音（150ms 单音，比 OGG_POPUP 更轻）
-        // 放在 kDeviceStateListening 时播，主人说"他说完话后要立马有个提示音，
-        // 我就知道可以说话了"——不用盯着小屏幕看。
-        // ⚠️ 必须是 Opus in Ogg 格式（PlaySound 只认 "OpusHead"），
-        //    用 OGG Vorbis 会一个字节都不播（踩过）。
-        extern const char ogg_listening_start[] asm("_binary_listening_ogg_start");
-        extern const char ogg_listening_end[] asm("_binary_listening_ogg_end");
-        static const std::string_view OGG_LISTENING {
-        static_cast<const char*>(ogg_listening_start),
-        static_cast<size_t>(ogg_listening_end - ogg_listening_start)
-        };
-
-        // 2026-10-13 新增：手势唤醒开场白「我来啦，您请讲」/ 手势关闭退场语
-        // 「那我退下了」。用 tools/gesture_voice_synth.py 预合成（火山 ogg_opus），
-        // 本地播放零延迟、不烧 TTS 额度、离线可用，与唤醒词路线的话术区分开。
-        extern const char ogg_gesture_welcome_start[] asm("_binary_gesture_welcome_ogg_start");
-        extern const char ogg_gesture_welcome_end[] asm("_binary_gesture_welcome_ogg_end");
-        static const std::string_view OGG_GESTURE_WELCOME {
-        static_cast<const char*>(ogg_gesture_welcome_start),
-        static_cast<size_t>(ogg_gesture_welcome_end - ogg_gesture_welcome_start)
-        };
-
-        extern const char ogg_gesture_bye_start[] asm("_binary_gesture_bye_ogg_start");
-        extern const char ogg_gesture_bye_end[] asm("_binary_gesture_bye_ogg_end");
-        static const std::string_view OGG_GESTURE_BYE {
-        static_cast<const char*>(ogg_gesture_bye_start),
-        static_cast<size_t>(ogg_gesture_bye_end - ogg_gesture_bye_start)
         };
 
         extern const char ogg_success_start[] asm("_binary_success_ogg_start");
